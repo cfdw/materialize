@@ -11,7 +11,20 @@ from functools import lru_cache
 from collections import OrderedDict
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import cast, Any, Dict, List, Set, Optional, Union, Iterable, Iterator, IO
+from typing import (
+    cast,
+    Any,
+    Dict,
+    List,
+    Set,
+    Optional,
+    Union,
+    Iterable,
+    Iterator,
+    IO,
+    overload,
+)
+from typing_extensions import Literal
 import base64
 import contextlib
 import enum
@@ -31,23 +44,47 @@ class AcquiredFrom(enum.Enum):
     LOCAL_BUILD = "local-build"
 
 
-def runv(args: List[Union[Path, str]],
-         cwd: Optional[Path] = None,
-         stdin: Optional[IO[bytes]] = None) -> None:
+def runv(
+    args: List[Union[Path, str]],
+    cwd: Optional[Path] = None,
+    stdin: Optional[IO[bytes]] = None,
+) -> None:
     args = [str(arg) for arg in args]  # type: List[str]
     cwd = str(cwd) if cwd is not None else None  # type: Optional[str]
     print("$", " ".join(args))
     subprocess.check_call(args, cwd=cwd, stdin=stdin)
 
 
-def capture(args: List[Union[Path, str]],
-            cwd: Optional[Path] = None,
-            universal_newlines: bool = False) -> Any:
+@overload
+def capture(
+    args: List[Union[Path, str]],
+    cwd: Optional[Path] = ...,
+    universal_newlines: Literal[False] = ...,
+) -> bytes:
+    ...
+
+
+@overload
+def capture(
+    args: List[Union[Path, str]],
+    cwd: Optional[Path] = ...,
+    *,
+    universal_newlines: Literal[True],
+) -> str:
+    ...
+
+
+def capture(
+    args: List[Union[Path, str]],
+    cwd: Optional[Path] = None,
+    universal_newlines: bool = False,
+) -> Union[str, bytes]:
     args = [str(arg) for arg in args]  # type: List[str]
     cwd = str(cwd) if cwd is not None else None  # type: Optional[str]
-    return subprocess.check_output(args,
-                                   cwd=cwd,
-                                   universal_newlines=universal_newlines)
+    if universal_newlines:
+        return subprocess.check_output(args, cwd=cwd, universal_newlines=True)
+    else:
+        return subprocess.check_output(args, cwd=cwd, universal_newlines=False)
 
 
 def xcargo(root: Path) -> Path:
@@ -73,16 +110,20 @@ def xstrip(root: Path) -> str:
 
 def docker_images() -> Set[str]:
     return set(
-        capture(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                universal_newlines=True).strip().split("\n"))
+        capture(
+            ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+            universal_newlines=True,
+        )
+        .strip()
+        .split("\n")
+    )
 
 
 def git_ls_files(root: Path, *specs: str) -> List[bytes]:
-    files = capture([
-        "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z",
-        *specs
-    ],
-                    cwd=root).split(b"\0")
+    files = capture(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", *specs],
+        cwd=root,
+    ).split(b"\0")
     return [f for f in files if f.strip() != b""]
 
 
@@ -113,8 +154,7 @@ class CargoBuild(PreImage):
     def run(self, root: Path, path: Path) -> None:
         super().run(root, path)
         runv([xcargo(root), "build", "--release", "--bin", self.bin], cwd=root)
-        shutil.copy(str(xcargo_target_dir(root) / "release" / self.bin),
-                    str(path))
+        shutil.copy(str(xcargo_target_dir(root) / "release" / self.bin), str(path))
         if self.strip:
             # NOTE(benesch): the debug information is large enough that it slows
             # down CI, since we're packaging these binaries up into Docker
@@ -125,7 +165,9 @@ class CargoBuild(PreImage):
     def depends(self, root: Path, path: Path) -> List[bytes]:
         # TODO(benesch): this should be much smarter about computing the Rust
         # files that actually contribute to this binary target.
-        return super().depends(root, path) + git_ls_files(root, "src/**", "Cargo.toml", "Cargo.lock")
+        return super().depends(root, path) + git_ls_files(
+            root, "src/**", "Cargo.toml", "Cargo.lock"
+        )
 
 
 # TODO(benesch): make this less hardcoded and custom.
@@ -144,29 +186,35 @@ class CargoTest(PreImage):
         # it built in a machine readable form. Without the first invocation, the
         # error messages would also be sent to the output file in JSON, and the
         # user would only see a vague "could not compile <package>" error.
-        args = [xcargo(root), "test", "--locked",
-                "--no-run"]  # type: List[Union[str,Path]]
+        args = [
+            xcargo(root),
+            "test",
+            "--locked",
+            "--no-run",
+        ]  # type: List[Union[str,Path]]
         runv(args)
 
         tests = []
-        for message in capture(args + ["--message-format=json"],
-                               universal_newlines=True).split("\n"):
-            if message.strip() == "":
+        for line in capture(
+            args + ["--message-format=json"], universal_newlines=True
+        ).split("\n"):
+            if line.strip() == "":
                 continue
-            message = json.loads(message)
+            message = json.loads(line)
             if message.get("profile", {}).get("test", False):
                 crate_name = message["package_id"].split()[0]
                 target_kind = "".join(message["target"]["kind"])
                 slug = crate_name + "." + target_kind
                 if target_kind != "lib":
                     slug += "." + message["target"]["name"]
-                crate_path_match = re.search("\(path\+file://(.*)\)",
-                                             message["package_id"])
+                crate_path_match = re.search(
+                    "\(path\+file://(.*)\)", message["package_id"]
+                )
                 if not crate_path_match:
-                    raise ValueError("invalid package_id: {}".format(
-                        message["package_id"]))
-                crate_path = Path(crate_path_match.group(1)).relative_to(
-                    root.resolve())
+                    raise ValueError(
+                        "invalid package_id: {}".format(message["package_id"])
+                    )
+                crate_path = Path(crate_path_match.group(1)).relative_to(root.resolve())
                 tests.append((message["executable"], slug, crate_path))
 
         os.makedirs(str(path / "tests" / "examples"))
@@ -178,13 +226,16 @@ class CargoTest(PreImage):
         shutil.move(str(path / "testdrive"), str(path / "tests"))
         shutil.copy(
             str(xcargo_target_dir(root) / "debug" / "examples" / "pingpong"),
-            str(path / "tests" / "examples"))
+            str(path / "tests" / "examples"),
+        )
         shutil.copytree(str(root / "misc" / "shlib"), str(path / "shlib"))
 
     def depends(self, root: Path, path: Path) -> List[bytes]:
         # TODO(benesch): this should be much smarter about computing the Rust
         # files that actually contribute to this binary target.
-        return super().depends(root, path) + git_ls_files(root, "src/**", "Cargo.toml", "Cargo.lock")
+        return super().depends(root, path) + git_ls_files(
+            root, "src/**", "Cargo.toml", "Cargo.lock"
+        )
 
 
 class Image:
@@ -196,7 +247,7 @@ class Image:
         self.pre_image = None  # type: Optional[PreImage]
         with open(str(self.path / "mzbuild.yml")) as f:
             data = yaml.safe_load(f)
-            self.name = data.pop("name", None)
+            self.name = data.pop("name")  # type: str
             self.publish = data.pop("publish", True)
             pre_image = data.pop("pre-image", None)
             if pre_image is not None:
@@ -207,13 +258,17 @@ class Image:
                     self.pre_image = CargoTest(pre_image)
                 else:
                     raise ValueError(
-                        "mzbuild config in {} has unknown pre-image type".
-                        format(self.path))
+                        "mzbuild config in {} has unknown pre-image type".format(
+                            self.path
+                        )
+                    )
 
         if re.search(r"[^A-Za-z0-9\-]", self.name):
             raise ValueError(
-                "mzbuild image name {} contains invalid character; only alphanumerics and hyphens allowed"
-                .format(self.name))
+                "mzbuild image name {} contains invalid character; only alphanumerics and hyphens allowed".format(
+                    self.name
+                )
+            )
 
         self.depends_on = []
         with open(str(self.path / "Dockerfile"), "rb") as f:
@@ -231,8 +286,7 @@ class Image:
             if match:
                 image = match.group(1).decode()
                 spec = dep_specs[image]
-                line = self.DOCKERFILE_MZFROM_RE.sub(
-                    b"FROM %b" % spec.encode(), line)
+                line = self.DOCKERFILE_MZFROM_RE.sub(b"FROM %b" % spec.encode(), line)
             f.write(line)
         f.seek(0)
         return f
@@ -250,11 +304,10 @@ class Image:
         if self.pre_image is not None:
             self.pre_image.run(self.root, self.path)
         f = self.write_dockerfile(dep_specs)
-        runv([
-            "docker", "build", "--pull", "-f", "-", "-t",
-            self.spec(), self.path
-        ],
-             stdin=f)
+        runv(
+            ["docker", "build", "--pull", "-f", "-", "-t", self.spec(), self.path],
+            stdin=f,
+        )
 
     def acquire(self, dep_specs: Dict[str, str]) -> AcquiredFrom:
         if self.publish:
@@ -333,8 +386,7 @@ class Repository:
                 if not image.name:
                     raise ValueError("config at {} missing name".format(path))
                 if image.name in self.images:
-                    raise ValueError("image {} exists twice".format(
-                        image.name))
+                    raise ValueError("image {} exists twice".format(image.name))
                 self.images[image.name] = image
             if "mzcompose.yml" in files:
                 self.compose_dirs.add(Path(path))
@@ -345,7 +397,9 @@ class Repository:
                 if d not in self.images:
                     raise ValueError(
                         "image {} depends on non-existent image {}".format(
-                            image.name, d))
+                            image.name, d
+                        )
+                    )
 
     def resolve_dependencies(self, targets: Iterable[Image]) -> DependencySet:
         resolved = OrderedDict()
@@ -355,8 +409,11 @@ class Repository:
             if image.name in resolved:
                 return
             if image.name in visiting:
-                raise ValueError("circular dependency in mzbuild: {}".format(
-                    " -> ".join(path + [image.name])))
+                raise ValueError(
+                    "circular dependency in mzbuild: {}".format(
+                        " -> ".join(path + [image.name])
+                    )
+                )
 
             visiting.add(image.name)
             for d in sorted(image.depends_on):

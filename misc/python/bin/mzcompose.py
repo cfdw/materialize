@@ -29,8 +29,10 @@ def main(argv: List[str]) -> int:
     if not args.file:
         config_file = "mzcompose.yml"
     elif len(args.file) > 1:
-        print("mzcompose: multiple -f/--file options are not yet supported",
-              file=sys.stderr)
+        print(
+            "mzcompose: multiple -f/--file options are not yet supported",
+            file=sys.stderr,
+        )
         return 1
     else:
         config_file = args.file[0]
@@ -56,17 +58,24 @@ def main(argv: List[str]) -> int:
                 del config["mzbuild"]
 
                 if image_name not in repo.images:
-                    print("mzcompose: unknown image {}".format(image_name),
-                          file=sys.stderr)
+                    print(
+                        "mzcompose: unknown image {}".format(image_name),
+                        file=sys.stderr,
+                    )
                     return 1
 
                 image = repo.images[image_name]
                 override_tag = os.environ.get(
-                    "MZBUILD_{}_TAG".format(image.env_var_name()), None)
+                    "MZBUILD_{}_TAG".format(image.env_var_name()), None
+                )
                 if override_tag is not None:
                     config["image"] = image.docker_name(override_tag)
-                    print("mzcompose: warning: overriding {} image to tag {}".
-                          format(image_name, override_tag, file=sys.stderr))
+                    print(
+                        "mzcompose: warning: overriding {} image to tag {}".format(
+                            image_name, override_tag
+                        ),
+                        file=sys.stderr,
+                    )
                 else:
                     config["image"] = image.spec()
                     images.append(image)
@@ -127,8 +136,7 @@ exec "$(dirname "$0")/{}/bin/mzcompose" "$@"
     for path in repo.compose_dirs:
         mzcompose_path = path / "mzcompose"
         with open(str(mzcompose_path), "w") as f:
-            f.write(template.format(os.path.relpath(str(repo.root),
-                                                    str(path))))
+            f.write(template.format(os.path.relpath(str(repo.root), str(path))))
         mzbuild.chmod_x(mzcompose_path)
     return 0
 
@@ -148,7 +156,7 @@ class ArgumentParser(argparse.ArgumentParser):
     def parse_known_args(
         self,
         args: Optional[Sequence[Text]] = None,
-        namespace: Optional[argparse.Namespace] = None
+        namespace: Optional[argparse.Namespace] = None,
     ) -> Tuple[argparse.Namespace, List[str]]:
         ns = argparse.Namespace()
         try:

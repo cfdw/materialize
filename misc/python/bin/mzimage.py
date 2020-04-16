@@ -36,8 +36,7 @@ def main(args: List[str]) -> int:
         image_name = args.pop(0)
         repo = mzbuild.Repository(root)
         if image_name not in repo.images:
-            print("fatal: unknown image: {}".format(image_name),
-                  file=sys.stderr)
+            print("fatal: unknown image: {}".format(image_name), file=sys.stderr)
             return 1
         image = repo.images[image_name]
         deps = repo.resolve_dependencies([image])
@@ -59,7 +58,8 @@ def main(args: List[str]) -> int:
 def print_usage() -> None:
     print(
         "usage: mz-image <build|run|acquire|fingerprint> <image> [<args>...]",
-        file=sys.stderr)
+        file=sys.stderr,
+    )
     print("   or: mz-image list", file=sys.stderr)
 
 
