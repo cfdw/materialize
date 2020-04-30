@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
-use std::io::Read;
 use std::mem;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -432,49 +431,27 @@ pub async fn create_state(
 
     let schema_registry_url = config.schema_registry_url.to_owned();
 
-    let mut ccsr_client_config = ccsr::ClientConfig::new(schema_registry_url.clone());
-
-    if let Some(keystore_path) = &config.keystore_path {
-        let keystore_pass = match &config.keystore_pass {
-            Some(p) => p.clone(),
-            None => "".to_string(),
-        };
-
-        let mut keystore_file = match fs::File::open(keystore_path) {
-            Ok(f) => f,
-            Err(e) => {
-                return Err(Error::General {
-                    ctx: "opening keystore file".into(),
-                    cause: Some(Box::new(e)),
-                    hints: vec![format!("is {} accessible to testdrive?", keystore_path)],
-                })
-            }
-        };
-
-        let mut keystore_buf = Vec::new();
-        if let Err(e) = keystore_file.read_to_end(&mut keystore_buf) {
-            return Err(Error::General {
+    let ccsr_client = {
+        let mut ccsr_client_config = ccsr::ClientConfig::new(schema_registry_url.clone());
+        if let Some(keystore_path) = &config.keystore_path {
+            let keystore_buf = fs::read(&keystore_path).map_err(|e| Error::General {
                 ctx: "reading keystore file".into(),
                 cause: Some(Box::new(e)),
                 hints: vec![format!("is {} readable from testdrive?", keystore_path)],
-            });
+            })?;
+            let keystore_pass = config.keystore_pass.as_deref().unwrap_or("");
+            let ident =
+                ccsr::Identity::from_pkcs12_der(&keystore_buf, keystore_pass).map_err(|e| {
+                    Error::General {
+                        ctx: "reading keystore file as pkcs12".into(),
+                        cause: Some(Box::new(e)),
+                        hints: vec![format!("is {} a valid pkcs12 file?", keystore_path)],
+                    }
+                })?;
+            ccsr_client_config = ccsr_client_config.identity(ident);
         }
-
-        let ident = match ccsr::Identity::from_pkcs12_der(&keystore_buf, &keystore_pass) {
-            Ok(i) => i,
-            Err(e) => {
-                return Err(Error::General {
-                    ctx: "reading keystore file as pkcs12".into(),
-                    cause: Some(Box::new(e)),
-                    hints: vec![format!("is {} a valid pkcs12 file?", keystore_path)],
-                })
-            }
-        };
-
-        ccsr_client_config = ccsr_client_config.identity(ident);
-    }
-
-    let ccsr_client = ccsr::AsyncClient::new(&ccsr_client_config);
+        ccsr::AsyncClient::new(&ccsr_client_config)
+    };
 
     let (kafka_url, kafka_admin, kafka_admin_opts, kafka_producer, kafka_topics) = {
         use rdkafka::admin::{AdminClient, AdminOptions};
