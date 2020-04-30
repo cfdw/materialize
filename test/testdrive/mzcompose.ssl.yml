@@ -23,6 +23,8 @@ services:
       - bash
       - -c
       - >-
+        ln -s /share/secrets/ca.crt /usr/local/share/ca-certificates/ca.crt &&
+        update-ca-certificates &&
         wait-for-it --timeout=30 broker:9092 &&
         wait-for-it --timeout=30 schema-registry:8081 &&
         wait-for-it --timeout=30 materialized:6875 &&
@@ -33,11 +35,9 @@ services:
         --validate-catalog=/share/mzdata
         --cert=/share/secrets/producer.p12
         --cert-password=mzmzmz
-        --root-cert=/share/secrets/ca.crt
         $$*
       - bash
     command: test/testdrive/ssl/*.td
-    user: root
     environment:
       - TMPDIR=/share/tmp
     volumes:
@@ -45,7 +45,6 @@ services:
       - mzdata:/share/mzdata
       - tmp:/share/tmp
       - secrets:/share/secrets
-    propagate-uid-gid: true
     init: true
     depends_on: [broker, zookeeper, schema-registry, materialized, test-certs]
   materialized:

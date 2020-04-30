@@ -48,7 +48,6 @@ pub struct Config {
     pub schema_registry_url: Url,
     pub keystore_path: Option<String>,
     pub keystore_pass: Option<String>,
-    pub root_cert_path: Option<String>,
     pub aws_region: rusoto_core::Region,
     pub aws_account: String,
     pub aws_credentials: AwsCredentials,
@@ -66,7 +65,6 @@ impl Default for Config {
             schema_registry_url: "http://localhost:8081".parse().unwrap(),
             keystore_path: None,
             keystore_pass: None,
-            root_cert_path: None,
             aws_region: rusoto_core::Region::default(),
             aws_account: DUMMY_AWS_ACCOUNT.into(),
             aws_credentials: AwsCredentials::new(
@@ -473,39 +471,6 @@ pub async fn create_state(
             }
         };
 
-        if let Some(root_cert_path) = &config.root_cert_path {
-            let mut root_cert_buf = Vec::new();
-            let mut root_cert_file = match fs::File::open(root_cert_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    return Err(Error::General {
-                        ctx: "opening root cert file".into(),
-                        cause: Some(Box::new(e)),
-                        hints: vec![format!("is {} accessible to testdrive?", root_cert_path)],
-                    })
-                }
-            };
-            if let Err(e) = root_cert_file.read_to_end(&mut root_cert_buf) {
-                return Err(Error::General {
-                    ctx: "reading root cert file".into(),
-                    cause: Some(Box::new(e)),
-                    hints: vec![format!("is {} readable from testdrive?", keystore_path)],
-                });
-            }
-            let root_cert = match ccsr::Certificate::from_pem(&root_cert_buf) {
-                Ok(i) => i,
-                Err(e) => {
-                    return Err(Error::General {
-                        ctx: "reading root cert file as pem".into(),
-                        cause: Some(Box::new(e)),
-                        hints: vec![format!("is {} a valid pem file?", keystore_path)],
-                    })
-                }
-            };
-
-            ccsr_client_config = ccsr_client_config.add_root_certificate(root_cert);
-        }
-
         ccsr_client_config = ccsr_client_config.identity(ident);
     }
 
@@ -525,9 +490,6 @@ pub async fn create_state(
             kafka_config.set("ssl.keystore.location", keystore_path.as_str());
             if let Some(keystore_pass) = &config.keystore_pass {
                 kafka_config.set("ssl.keystore.password", keystore_pass.as_str());
-            }
-            if let Some(root_cert_path) = &config.root_cert_path {
-                kafka_config.set("ssl.ca.location", root_cert_path.as_str());
             }
         }
 

@@ -45,7 +45,6 @@ async fn run() -> Result<(), Error> {
         "PATH",
     );
     opts.optopt("", "cert-password", "Keystore password", "PASSWORD");
-    opts.optopt("", "root-cert", "Path to the root CA's cert (.pem)", "PATH");
     opts.optopt(
         "",
         "aws-region",
@@ -105,16 +104,6 @@ async fn run() -> Result<(), Error> {
     }
     if let Some(pass) = opts.opt_str("cert-password") {
         config.keystore_pass = Some(pass);
-    }
-    if let Some(path) = opts.opt_str("root-cert") {
-        if std::fs::metadata(&path).is_err() {
-            return Err(Error::General {
-                ctx: "root certificate path does not exist".into(),
-                cause: None,
-                hints: vec![],
-            });
-        }
-        config.root_cert_path = Some(path);
     }
 
     if let (Ok(Some(region)), None) = (opts.opt_get("aws-region"), opts.opt_str("aws-endpoint")) {
