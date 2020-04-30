@@ -462,7 +462,7 @@ pub async fn create_state(
             });
         }
 
-        let ident = match ccsr::Identity::from_pkcs12_der(&keystore_buf, &keystore_pass) {
+        let ident = match ccsr::Identity::from_pkcs12_der(keystore_buf, keystore_pass) {
             Ok(i) => i,
             Err(e) => {
                 return Err(Error::General {
@@ -509,7 +509,7 @@ pub async fn create_state(
         ccsr_client_config = ccsr_client_config.identity(ident);
     }
 
-    let ccsr_client = ccsr::AsyncClient::new(&ccsr_client_config);
+    let ccsr_client = ccsr_client_config.build_async();
 
     let (kafka_url, kafka_admin, kafka_admin_opts, kafka_producer, kafka_topics) = {
         use rdkafka::admin::{AdminClient, AdminOptions};
