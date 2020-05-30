@@ -82,13 +82,15 @@ where
 
 /// Parses a 32-bit integer from a string.
 ///
-/// Valid values are whatever [`i32::from_str`] accepts, plus leading and
-/// trailing whitespace.
+/// Valid values are whatever the [`FromStr`] implementation on [`i32`] accepts,
+/// plus leading and trailing whitespace.
 pub fn parse_int32(s: &str) -> Result<i32, failure::Error> {
     Ok(s.trim().parse()?)
 }
 
 /// Writes a 32-bit integer to a buffer.
+///
+/// The integer is encoded in base 10.
 pub fn format_int32<F>(buf: &mut F, i: i32) -> Nestable
 where
     F: FormatBuffer,
@@ -106,6 +108,8 @@ pub fn parse_int64(s: &str) -> Result<i64, failure::Error> {
 }
 
 /// Writes a 64-bit integer to a buffer.
+///
+/// The integer is encoded in base 10.
 pub fn format_int64<F>(buf: &mut F, i: i64) -> Nestable
 where
     F: FormatBuffer,
@@ -116,9 +120,9 @@ where
 
 /// Parses a 32-bit floating-point number from a string.
 ///
-/// Valid values are whatever the [`FromStr`]  implementation on [`f32`] accepts
-/// plus the following special strings for special floating-point values, plus
-/// leading and trailing whitespace.
+/// Valid values are whatever the [`FromStr`](std::str::FromStr) implementation
+/// on [`f32`] accepts plus the following special strings for special
+/// floating-point values, plus leading and trailing whitespace.
 ///
 /// Input | Output
 /// ------|-------
@@ -419,6 +423,15 @@ fn parse_bytes_traditional(buf: &[u8]) -> Result<Vec<u8>, failure::Error> {
 }
 
 /// Writes a byte vector into a buffer.
+///
+/// The bytes are encoded as hex strings and preceded by the string "\x".
+///
+/// # Examples
+///
+/// ```rust
+/// let mut buf = String::new();
+/// strconv::format_bytes(&mut buf, )
+/// ```
 pub fn format_bytes<F>(buf: &mut F, bytes: &[u8]) -> Nestable
 where
     F: FormatBuffer,
