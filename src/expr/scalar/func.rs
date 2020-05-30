@@ -18,9 +18,10 @@ use encoding::DecoderTrap;
 use serde::{Deserialize, Serialize};
 
 use ore::collections::CollectionExt;
-use repr::decimal::MAX_DECIMAL_PRECISION;
-use repr::jsonb::Jsonb;
-use repr::regex::Regex;
+use repr::adt::decimal::MAX_DECIMAL_PRECISION;
+use repr::adt::interval::Interval;
+use repr::adt::jsonb::Jsonb;
+use repr::adt::regex::Regex;
 use repr::{strconv, ColumnType, Datum, RowArena, RowPacker, ScalarType};
 
 use crate::scalar::func::format::DateTimeFormat;
@@ -383,7 +384,7 @@ fn cast_time_to_string<'a>(a: Datum<'a>, temp_storage: &'a RowArena) -> Datum<'a
 
 fn cast_time_to_interval<'a>(a: Datum<'a>) -> Datum<'a> {
     let t = a.unwrap_time();
-    Datum::Interval(repr::Interval {
+    Datum::Interval(Interval {
         duration: std::time::Duration::new(t.num_seconds_from_midnight() as u64, t.nanosecond()),
         ..Default::default()
     })
@@ -426,7 +427,7 @@ fn cast_interval_to_string<'a>(a: Datum<'a>, temp_storage: &'a RowArena) -> Datu
 fn cast_interval_to_time<'a>(a: Datum<'a>) -> Datum<'a> {
     let mut i = a.unwrap_interval();
     if !i.is_positive_dur {
-        i = i + repr::Interval {
+        i = i + Interval {
             duration: std::time::Duration::from_secs(86400),
             ..Default::default()
         };

@@ -7,6 +7,10 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+//! Date and time utilities.
+
+#![allow(missing_docs)]
+
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fmt;
@@ -16,7 +20,7 @@ use std::time::Duration;
 use chrono::{NaiveDate, NaiveTime};
 use failure::{bail, ensure, format_err};
 
-use super::Interval;
+use crate::adt::interval::Interval;
 
 type Result<T> = std::result::Result<T, failure::Error>;
 

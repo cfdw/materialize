@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::mem;
 
-use repr::regex::Regex;
+use repr::adt::regex::Regex;
 use repr::{ColumnType, Datum, RelationType, Row, RowArena, ScalarType};
 use serde::{Deserialize, Serialize};
 

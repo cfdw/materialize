@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ScalarType;
 
-/// The type of a [`Datum`](crate::Datum).
+/// The type of a [`Datum`](crate::Datum) with additional metadata.
 ///
 /// [`ColumnType`] bundles information about the scalar type of a datum (e.g.,
 /// Int32 or String) with additional attributes, like its nullability.
@@ -22,7 +22,7 @@ use crate::ScalarType;
 pub struct ColumnType {
     /// Whether this datum can be null.
     pub nullable: bool,
-    /// The underlying scalar type (e.g., Int32 or String) of this column.
+    /// The underlying scalar type of this column.
     pub scalar_type: ScalarType,
 }
 
@@ -41,6 +41,12 @@ impl ColumnType {
         }
     }
 
+    /// Constructs a new [`ColumnType`] that can represent values of both the
+    /// existing and new type.
+    ///
+    /// # Errors
+    ///
+    /// Errors if no such `ColumnType` can be constructed.
     pub fn union(&self, other: &Self) -> Result<Self, failure::Error> {
         let scalar_type = match (&self.scalar_type, &other.scalar_type) {
             (ScalarType::Unknown, s) | (s, ScalarType::Unknown) => s.clone(),
@@ -63,9 +69,23 @@ impl ColumnType {
         self
     }
 
-    /// Required outside of builder contexts.
+    /// Sets the nullability of this `ColumnType`.
+    ///
+    /// This is an alternative to [`ColumnType::nullable`] that can be used
+    /// outside of builder contexts.
     pub fn set_nullable(&mut self, nullable: bool) {
         self.nullable = nullable
+    }
+}
+
+impl fmt::Display for ColumnType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}{}",
+            self.scalar_type,
+            if self.nullable { "?" } else { "" }
+        )
     }
 }
 
@@ -150,8 +170,10 @@ impl From<&ColumnName> for ColumnName {
     }
 }
 
-/// A complete relation description. Bundles together a `RelationType` with
-/// additional metadata, like the names of each column.
+/// A description of the shape of a relation.
+///
+/// It bundles a [`RelationType`] with additional metadata, like the names of
+/// each column.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct RelationDesc {
     typ: RelationType,

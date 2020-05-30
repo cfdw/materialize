@@ -26,8 +26,8 @@ use avro::schema::{
     SchemaPieceOrNamed,
 };
 use avro::types::{DecimalValue, Value};
-use repr::decimal::{Significand, MAX_DECIMAL_PRECISION};
-use repr::jsonb::Jsonb;
+use repr::adt::decimal::{Significand, MAX_DECIMAL_PRECISION};
+use repr::adt::jsonb::Jsonb;
 use repr::{ColumnType, Datum, RelationDesc, RelationType, Row, RowPacker, ScalarType};
 
 use crate::error::Result;

@@ -12,18 +12,18 @@
 //!
 //! The functions in this module are tightly related to the variants of
 //! [`ScalarType`](crate::ScalarType). Each variant has a pair of functions in
-//! this module named `parse_VARIANT` and `format_VARIANT`. The type returned
-//! by `parse` functions, and the type accepted by `format` functions, will
-//! be a type that is easily converted into the [`Datum`](crate::Datum) variant
-//! for that type. The functions do not directly convert from `Datum`s to
-//! `String`s so that the logic can be reused when `Datum`s are not available or
-//! desired, as in the pgrepr crate.
+//! this module named `parse_<variant>` and `format_<variant>`. The type returned by
+//! `parse` functions, and the type accepted by `format` functions, will be a
+//! type that is easily converted into the [`Datum`](crate::Datum) variant for
+//! that type.
+//!
+//! The functions in this module do not directly convert from `Datum`s to
+//! `String`s so that their logic can be reused when `Datum`s are not available
+//! or desired, as in the pgrepr crate.
 //!
 //! The string representations used are exactly the same as the PostgreSQL
 //! string representations for the corresponding PostgreSQL type. Deviations
 //! should be considered a bug.
-
-use std::{f32, f64};
 
 use chrono::offset::TimeZone;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
@@ -31,18 +31,20 @@ use failure::{bail, format_err};
 
 use ore::fmt::FormatBuffer;
 
-use crate::datetime::{DateTimeField, ParsedDateTime};
-use crate::decimal::Decimal;
-use crate::jsonb::Jsonb;
-use crate::Interval;
+use crate::adt::datetime::{self, DateTimeField, ParsedDateTime};
+use crate::adt::decimal::Decimal;
+use crate::adt::interval::Interval;
+use crate::adt::jsonb::Jsonb;
 
+/// Whether the formatted representation can be nested in a list without
+/// escaping.
 #[derive(Debug)]
 pub enum Nestable {
     Yes,
     MayNeedEscaping,
 }
 
-/// Parses a [`bool`] from `s`.
+/// Parses a boolean value from a string.
 ///
 /// The accepted values are "true", "false", "yes", "no", "on", "off", "1", and
 /// "0", or any unambiguous prefix of one of those values. Leading or trailing
@@ -55,7 +57,7 @@ pub fn parse_bool(s: &str) -> Result<bool, failure::Error> {
     }
 }
 
-/// Like `format_bool`, but returns a string with a static lifetime.
+/// Like [`format_bool`], but returns a string with a static lifetime.
 ///
 /// This function should be preferred to `format_bool` when applicable, as it
 /// avoids an allocation.
@@ -66,7 +68,7 @@ pub fn format_bool_static(b: bool) -> &'static str {
     }
 }
 
-/// Writes a boolean value into `buf`.
+/// Writes a boolean value into a buffer.
 ///
 /// `true` is encoded as the char `'t'` and `false` is encoded as the char
 /// `'f'`.
@@ -78,15 +80,15 @@ where
     Nestable::Yes
 }
 
-/// Parses an [`i32`] from `s`.
+/// Parses a 32-bit integer from a string.
 ///
-/// Valid values are whatever the [`FromStr`] implementation on `i32` accepts,
-/// plus leading and trailing whitespace.
+/// Valid values are whatever [`i32::from_str`] accepts, plus leading and
+/// trailing whitespace.
 pub fn parse_int32(s: &str) -> Result<i32, failure::Error> {
     Ok(s.trim().parse()?)
 }
 
-/// Writes an [`i32`] to `buf`.
+/// Writes a 32-bit integer to a buffer.
 pub fn format_int32<F>(buf: &mut F, i: i32) -> Nestable
 where
     F: FormatBuffer,
@@ -95,12 +97,15 @@ where
     Nestable::Yes
 }
 
-/// Parses an `i64` from `s`.
+/// Parses a 64-bit integer from a string.
+///
+/// Valid values are whatever the [`FromStr`] implementation on [`i64`] accepts,
+/// plus leading and trailing whitespace.
 pub fn parse_int64(s: &str) -> Result<i64, failure::Error> {
     Ok(s.trim().parse()?)
 }
 
-/// Writes an `i64` to `buf`.
+/// Writes a 64-bit integer to a buffer.
 pub fn format_int64<F>(buf: &mut F, i: i64) -> Nestable
 where
     F: FormatBuffer,
@@ -109,7 +114,17 @@ where
     Nestable::Yes
 }
 
-/// Parses an `f32` from `s`.
+/// Parses a 32-bit floating-point number from a string.
+///
+/// Valid values are whatever the [`FromStr`]  implementation on [`f32`] accepts
+/// plus the following special strings for special floating-point values, plus
+/// leading and trailing whitespace.
+///
+/// Input | Output
+/// ------|-------
+/// inf, infinity, +inf, +infinity | `f32::INFINITY`
+/// -inf, -infinity                | `f32::NEG_INFINITY`
+/// nan                            | `f32::NAN`
 pub fn parse_float32(s: &str) -> Result<f32, failure::Error> {
     Ok(match s.trim().to_lowercase().as_str() {
         "inf" | "infinity" | "+inf" | "+infinity" => f32::INFINITY,
@@ -119,7 +134,7 @@ pub fn parse_float32(s: &str) -> Result<f32, failure::Error> {
     })
 }
 
-/// Writes an `f32` to `buf`.
+/// Writes a 32-bit floating-point number to a buffer.
 pub fn format_float32<F>(buf: &mut F, f: f32) -> Nestable
 where
     F: FormatBuffer,
@@ -136,7 +151,7 @@ where
     Nestable::Yes
 }
 
-/// Parses an `f64` from `s`.
+/// Parses a 64-bit floating-point number from a string.
 pub fn parse_float64(s: &str) -> Result<f64, failure::Error> {
     Ok(match s.trim().to_lowercase().as_str() {
         "inf" | "infinity" | "+inf" | "+infinity" => f64::INFINITY,
@@ -146,7 +161,7 @@ pub fn parse_float64(s: &str) -> Result<f64, failure::Error> {
     })
 }
 
-/// Writes an `f64` to `buf`.
+/// Writes a 64-bit floating point number to a buffer.
 pub fn format_float64<F>(buf: &mut F, f: f64) -> Nestable
 where
     F: FormatBuffer,
@@ -163,7 +178,7 @@ where
     Nestable::Yes
 }
 
-/// Use the following grammar to parse `s` into:
+/// Uses the following grammar to parse `s` into:
 ///
 /// - `NaiveDate`
 /// - `NaiveTime`
@@ -198,7 +213,7 @@ fn parse_timestamp_string(s: &str) -> Result<(NaiveDate, NaiveTime, i64), failur
         ));
     }
 
-    let (ts_string, tz_string) = crate::datetime::split_timestamp_string(s);
+    let (ts_string, tz_string) = datetime::split_timestamp_string(s);
 
     let pdt = ParsedDateTime::build_parsed_datetime_timestamp(&ts_string)?;
     let d: NaiveDate = pdt.compute_date()?;
@@ -207,13 +222,13 @@ fn parse_timestamp_string(s: &str) -> Result<(NaiveDate, NaiveTime, i64), failur
     let offset = if tz_string.is_empty() {
         0
     } else {
-        crate::datetime::parse_timezone_offset_second(tz_string)?
+        datetime::parse_timezone_offset_second(tz_string)?
     };
 
     Ok((d, t, offset))
 }
 
-/// Parses a [`NaiveDate`] from `s`.
+/// Parses a date from a string.
 pub fn parse_date(s: &str) -> Result<NaiveDate, failure::Error> {
     match parse_timestamp_string(s) {
         Ok((date, _, _)) => Ok(date),
@@ -221,7 +236,7 @@ pub fn parse_date(s: &str) -> Result<NaiveDate, failure::Error> {
     }
 }
 
-/// Writes a [`NaiveDate`] to `buf`.
+/// Writes a date to a buffer.
 pub fn format_date<F>(buf: &mut F, d: NaiveDate) -> Nestable
 where
     F: FormatBuffer,
@@ -246,7 +261,7 @@ pub fn parse_time(s: &str) -> Result<NaiveTime, failure::Error> {
     }
 }
 
-/// Writes a [`NaiveDateTime`] timestamp to `buf`.
+/// Writes a time to a buffer.
 pub fn format_time<F>(buf: &mut F, t: NaiveTime) -> Nestable
 where
     F: FormatBuffer,
@@ -258,7 +273,7 @@ where
     Nestable::MayNeedEscaping
 }
 
-/// Parses a `NaiveDateTime` from `s`.
+/// Parses a time from a string.
 pub fn parse_timestamp(s: &str) -> Result<NaiveDateTime, failure::Error> {
     match parse_timestamp_string(s) {
         Ok((date, time, _)) => Ok(date.and_time(time)),
@@ -266,7 +281,7 @@ pub fn parse_timestamp(s: &str) -> Result<NaiveDateTime, failure::Error> {
     }
 }
 
-/// Writes a [`NaiveDateTime`] timestamp to `buf`.
+/// Writes a timestamp to a buffer.
 pub fn format_timestamp<F>(buf: &mut F, ts: NaiveDateTime) -> Nestable
 where
     F: FormatBuffer,
@@ -278,7 +293,7 @@ where
     Nestable::MayNeedEscaping
 }
 
-/// Parses a `DateTime<Utc>` from `s`.
+/// Parses a timezone-aware timestamp from a string.
 pub fn parse_timestamptz(s: &str) -> Result<DateTime<Utc>, failure::Error> {
     let (date, time, offset) = match parse_timestamp_string(s) {
         Ok((date, time, tz_string)) => (date, time, tz_string),
@@ -295,7 +310,7 @@ pub fn parse_timestamptz(s: &str) -> Result<DateTime<Utc>, failure::Error> {
     Ok(DateTime::<Utc>::from_utc(dt_fixed_offset.naive_utc(), Utc))
 }
 
-/// Writes a [`DateTime<Utc>`] timestamp to `buf`.
+/// Writes a timezone-aware timestamp to a buffer.
 pub fn format_timestamptz<F>(buf: &mut F, ts: DateTime<Utc>) -> Nestable
 where
     F: FormatBuffer,
@@ -307,33 +322,17 @@ where
     Nestable::MayNeedEscaping
 }
 
-/// parse
-///
-/// ```text
-/// <unquoted interval string> ::=
-///   [ <sign> ] { <year-month literal> | <day-time literal> }
-/// <year-month literal> ::=
-///     <years value> [ <minus sign> <months value> ]
-///   | <months value>
-/// <day-time literal> ::=
-///     <day-time interval>
-///   | <time interval>
-/// <day-time interval> ::=
-///   <days value> [ <space> <hours value> [ <colon> <minutes value>
-///       [ <colon> <seconds value> ] ] ]
-/// <time interval> ::=
-///     <hours value> [ <colon> <minutes value> [ <colon> <seconds value> ] ]
-///   | <minutes value> [ <colon> <seconds value> ]
-///   | <seconds value>
-/// ```
+/// Parses an interval from a string.
 pub fn parse_interval(s: &str) -> Result<Interval, failure::Error> {
-    parse_interval_w_disambiguator(s, DateTimeField::Second)
+    parse_interval_disambiguated(s, DateTimeField::Second)
 }
 
-/// Parse an interval string, using a specific sql_parser::ast::DateTimeField
-/// to identify ambiguous elements. For more information about this operation,
-/// see the doucmentation on ParsedDateTime::build_parsed_datetime_interval.
-pub fn parse_interval_w_disambiguator(
+/// Like [`parse_interval`], but takes a date/time field to identify ambiguous
+/// elements.
+///
+/// For more information about this operation, see
+/// [`ParsedDateTime::build_parsed_datetime_interval`].
+pub fn parse_interval_disambiguated(
     s: &str,
     d: DateTimeField,
 ) -> Result<Interval, failure::Error> {
@@ -348,6 +347,7 @@ pub fn parse_interval_w_disambiguator(
     }
 }
 
+/// Writes an interval to a buffer.
 pub fn format_interval<F>(buf: &mut F, iv: Interval) -> Nestable
 where
     F: FormatBuffer,
@@ -356,10 +356,12 @@ where
     Nestable::MayNeedEscaping
 }
 
+/// Parses a decimal from a string.
 pub fn parse_decimal(s: &str) -> Result<Decimal, failure::Error> {
     s.trim().parse()
 }
 
+/// Writes a decimal to a buffer.
 pub fn format_decimal<F>(buf: &mut F, d: &Decimal) -> Nestable
 where
     F: FormatBuffer,
@@ -368,6 +370,7 @@ where
     Nestable::Yes
 }
 
+/// Writes a string to a buffer.
 pub fn format_string<F>(buf: &mut F, s: &str) -> Nestable
 where
     F: FormatBuffer,
@@ -376,6 +379,7 @@ where
     Nestable::MayNeedEscaping
 }
 
+/// Parses a byte vector from a string.
 pub fn parse_bytes(s: &str) -> Result<Vec<u8>, failure::Error> {
     // If the input starts with "\x", then the remaining bytes are hex encoded
     // [0]. Otherwise the bytes use the traditional "escape" format. [1]
@@ -414,6 +418,7 @@ fn parse_bytes_traditional(buf: &[u8]) -> Result<Vec<u8>, failure::Error> {
     Ok(out)
 }
 
+/// Writes a byte vector into a buffer.
 pub fn format_bytes<F>(buf: &mut F, bytes: &[u8]) -> Nestable
 where
     F: FormatBuffer,
@@ -422,10 +427,12 @@ where
     Nestable::Yes
 }
 
+/// Parses a JSON object from a string.
 pub fn parse_jsonb(s: &str) -> Result<Jsonb, failure::Error> {
     s.trim().parse()
 }
 
+/// Writes a JSON object to a buffer in a compressed format.
 pub fn format_jsonb<F>(buf: &mut F, jsonb: &Jsonb) -> Nestable
 where
     F: FormatBuffer,
@@ -434,6 +441,7 @@ where
     Nestable::MayNeedEscaping
 }
 
+/// Writes a JSON object to a buffer in a pretty format.
 pub fn format_jsonb_pretty<F>(buf: &mut F, jsonb: &Jsonb)
 where
     F: FormatBuffer,
@@ -455,6 +463,7 @@ where
     }
 }
 
+/// Parses a list from a string.
 pub fn parse_list<T>(
     s: &str,
     mut make_null: impl FnMut() -> T,
@@ -566,6 +575,7 @@ pub fn parse_list<T>(
     Ok(elems)
 }
 
+/// Writes a list to a buffer.
 pub fn format_list<F, T>(
     buf: &mut F,
     elems: &[T],
@@ -648,7 +658,7 @@ where
     assert!(wi == start);
 }
 
-/// A helper for `format_list` that formats a single list element.
+/// A helper for [`format_list`] that formats a single list element.
 #[derive(Debug)]
 pub struct ListElementWriter<'a, F>(&'a mut F);
 

@@ -34,8 +34,8 @@ use sql_parser::ast::ColumnOption;
 use sql_parser::ast::{DataType, ObjectType, Statement};
 use tokio_postgres::types::FromSql;
 
-use repr::decimal::Significand;
-use repr::jsonb::Jsonb;
+use repr::adt::decimal::Significand;
+use repr::adt::jsonb::Jsonb;
 use repr::{ColumnType, Datum, RelationDesc, RelationType, Row, RowPacker, ScalarType};
 use sql::{
     normalize, scalar_type_from_sql, FullName, MutationKind, Plan, PlanCatalog, PlanContext,

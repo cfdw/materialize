@@ -12,27 +12,38 @@ use std::cell::RefCell;
 use std::fmt;
 use std::mem::{size_of, transmute};
 
-use crate::decimal::Significand;
-use crate::scalar::Interval;
-use crate::Datum;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
-/// A packed representation for `Datum`s.
+use crate::adt::decimal::Significand;
+use crate::adt::interval::Interval;
+use crate::Datum;
+
+/// A packed representation for [`Datum`]s.
 ///
-/// `Datum` is easy to work with but very space inefficent. A `Datum::Int32(42)` is laid out in memory like this:
+/// `Datum` is easy to work with but very space inefficent. A `Datum::Int32(42)`
+/// is laid out in memory like this
 ///
-///   tag: 3
-///   padding: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-///   data: 0 0 0 42
-///   padding: 0 0 0 0 0 0 0 0 0 0 0 0
+/// ```text
+/// tag: 3
+/// padding: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+/// data: 0 0 0 42
+/// padding: 0 0 0 0 0 0 0 0 0 0 0 0
+/// ```
 ///
-/// For a total of 32 bytes! The second set of padding is needed in case we were to write a `Datum::Decimal` into this location. The first set of padding is needed to align that hypothetical decimal to a 16 bytes boundary.
+/// for a total of 32 bytes! The second set of padding is needed in case we were
+/// to write a [`Datum::Decimal`] into this location. The first set of padding
+/// is needed to align that hypothetical decimal to a 16 bytes boundary.
 ///
 /// A `Row` stores zero or more `Datum`s without any padding.
-/// We avoid the need for the first set of padding by only providing access to the `Datum`s via calls to `ptr::read_unaligned`, which on modern x86 is barely penalized.
-/// We avoid the need for the second set of padding by not providing mutable access to the `Datum`. Instead, `Row` is append-only.
+///
+/// We avoid the need for the first set of padding by only providing access to
+/// the `Datum`s via calls to [`std::ptr::read_unaligned`], which on modern x86
+/// is barely penalized.
+///
+/// We avoid the need for the second set of padding by not providing mutable
+/// access to the `Datum`. Instead, `Row` is append-only.
 ///
 /// A `Row` can be built from a collection of `Datum`s using `Row::pack`
 ///
@@ -50,7 +61,9 @@ use serde::{Deserialize, Serialize};
 /// assert_eq!(row.iter().nth(1).unwrap(), Datum::Int32(1));
 /// ```
 ///
-/// If you want random access to the `Datum`s in a `Row`, use `Row::unpack` to create a `Vec<Datum>`
+/// If you want random access to the `Datum`s in a `Row`, use `Row::unpack` to
+/// create a `Vec<Datum>`
+///
 /// ```
 /// # use repr::{Row, Datum};
 /// let row = Row::pack(&[Datum::Int32(0), Datum::Int32(1), Datum::Int32(2)]);
@@ -97,7 +110,10 @@ pub struct DatumDictIter<'a> {
     prev_key: Option<&'a str>,
 }
 
-/// `RowPacker` is used to build a `Row`. It is usually simpler to use `Row::pack` instead, but sometimes awkward control flow might require using `RowPacker` directly.
+/// A [`Row`] builder.
+///
+/// It is usually simpler to use `Row::pack` instead, but sometimes awkward
+/// control flow might require using `RowPacker` directly.
 ///
 /// ```
 /// # use repr::{Row, Datum, RowPacker};
@@ -111,7 +127,9 @@ pub struct RowPacker {
     data: Vec<u8>,
 }
 
-/// `RowArena` is used to hold on to temporary `Row`s for functions like `eval` that need to create complex `Datum`s but don't have a `Row` to put them in yet.
+/// `RowArena` is used to hold on to temporary `Row`s for functions like `eval`
+/// that need to create complex `Datum`s but don't have a `Row` to put them in
+/// yet.
 #[derive(Debug)]
 pub struct RowArena {
     inner: RefCell<RowArenaInner>,
@@ -123,19 +141,20 @@ struct RowArenaInner {
     owned_rows: Vec<Row>,
 }
 
-// DatumList and DatumDict defined here rather than near Datum because we need private access to the unsafe data field
+// DatumList and DatumDict defined here rather than near Datum because we need
+// private access to the unsafe data field.
 
-/// A sequence of Datums
+/// A sequence of [`Datum`]s.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DatumList<'a> {
-    /// Points at the serialized datums
+    /// Points at the serialized datums.
     data: &'a [u8],
 }
 
-/// A mapping from string keys to Datums
+/// A mapping from string keys to [`Datum`]s.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DatumDict<'a> {
-    /// Points at the serialized datums, which should be sorted in key order
+    /// Points at the serialized datums, which should be sorted in key order.
     data: &'a [u8],
 }
 
@@ -166,12 +185,14 @@ enum Tag {
 
 /// Reads a `Copy` value starting at byte `offset`.
 ///
-/// Updates `offset` to point to the first byte after the end of the read region.
+/// Updates `offset` to point to the first byte after the end of the read
+/// region.
 ///
 /// # Safety
 ///
-/// This function is safe if a value of type `T` was previously written at this offset by `push_copy!`.
-/// Otherwise it could return invalid values, which is Undefined Behavior.
+/// This function is safe if a value of type `T` was previously written at this
+/// offset by `push_copy!`. Otherwise it could return invalid values, which is
+/// Undefined Behavior.
 #[inline(always)]
 unsafe fn read_copy<T>(data: &[u8], offset: &mut usize) -> T
 where
@@ -185,12 +206,14 @@ where
 
 /// Read a byte slice starting at byte `offset`.
 ///
-/// Updates `offset` to point to the first byte after the end of the read region.
+/// Updates `offset` to point to the first byte after the end of the read
+/// region.
 ///
 /// # Safety
 ///
-/// This function is safe if a `&[u8]` was previously written at this offset by `push_untagged_bytes`.
-/// Otherwise it could return invalid values, which is Undefined Behavior.
+/// This function is safe if a `&[u8]` was previously written at this offset by
+/// `push_untagged_bytes`. Otherwise it could return invalid values, which is
+/// Undefined Behavior.
 unsafe fn read_untagged_bytes<'a>(data: &'a [u8], offset: &mut usize) -> &'a [u8] {
     let len = read_copy::<usize>(data, offset);
     let bytes = &data[*offset..(*offset + len)];
@@ -200,12 +223,14 @@ unsafe fn read_untagged_bytes<'a>(data: &'a [u8], offset: &mut usize) -> &'a [u8
 
 /// Read a string starting at byte `offset`.
 ///
-/// Updates `offset` to point to the first byte after the end of the read region.
+/// Updates `offset` to point to the first byte after the end of the read
+/// region.
 ///
 /// # Safety
 ///
-/// This function is safe if a `str` was previously written at this offset by `push_untagged_string`.
-/// Otherwise it could return invalid values, which is Undefined Behavior.
+/// This function is safe if a `str` was previously written at this offset by
+/// `push_untagged_string`. Otherwise it could return invalid values, which is
+/// Undefined Behavior.
 unsafe fn read_untagged_string<'a>(data: &'a [u8], offset: &mut usize) -> &'a str {
     let bytes = read_untagged_bytes(data, offset);
     std::str::from_utf8_unchecked(bytes)
@@ -213,12 +238,14 @@ unsafe fn read_untagged_string<'a>(data: &'a [u8], offset: &mut usize) -> &'a st
 
 /// Read a datum starting at byte `offset`.
 ///
-/// Updates `offset` to point to the first byte after the end of the read region.
+/// Updates `offset` to point to the first byte after the end of the read
+/// region.
 ///
 /// # Safety
 ///
-/// This function is safe if a `Datum` was previously written at this offset by `push_datum`.
-/// Otherwise it could return invalid values, which is Undefined Behavior.
+/// This function is safe if a `Datum` was previously written at this offset by
+/// `push_datum`. Otherwise it could return invalid values, which is Undefined
+/// Behavior.
 unsafe fn read_datum<'a>(data: &'a [u8], offset: &mut usize) -> Datum<'a> {
     let tag = read_copy::<Tag>(data, offset);
     match tag {
@@ -297,7 +324,8 @@ unsafe fn read_datum<'a>(data: &'a [u8], offset: &mut usize) -> Datum<'a> {
 
 fn assert_is_copy<T: Copy>(_t: T) {}
 
-// See https://github.com/rust-lang/rust/issues/43408 for why this can't be a function
+// See https://github.com/rust-lang/rust/issues/43408 for why this can't be a
+// function.
 macro_rules! push_copy {
     ($data:expr, $t:expr, $T:ty) => {
         let t: $T = $t;
@@ -383,7 +411,8 @@ fn push_datum(data: &mut Vec<u8>, datum: Datum) {
     }
 }
 
-/// Number of bytes required by the datum.
+/// Computes the number of bytes required by the datum when packed into a
+/// [`Row`].
 ///
 /// This is used to optimistically pre-allocate buffers for packing rows.
 pub fn datum_size(datum: &Datum) -> usize {
@@ -415,7 +444,7 @@ pub fn datum_size(datum: &Datum) -> usize {
 // public api
 
 impl Row {
-    /// Take some `Datum`s and pack them into a `Row`.
+    /// Takes some [`Datum`]s and packs them into a `Row`.
     pub fn pack<'a, I, D>(iter: I) -> Row
     where
         I: IntoIterator<Item = D>,
@@ -443,15 +472,15 @@ impl Row {
         Ok(packer.finish())
     }
 
-    /// Pack a slice of `Datum`s into a `Row`.
+    /// Packs a slice of `Datum`s into a `Row`.
     ///
-    /// This method has the advantage over `pack` that it can determine the required
-    /// allocation before packing the elements, ensuring only one allocation and no
-    /// redundant copies required.
+    /// This method has the advantage over `pack` that it can determine the
+    /// required allocation before packing the elements, ensuring only one
+    /// allocation and no redundant copies required.
     ///
-    /// TODO: This could also be done for cloneable iterators, though we would need to be
-    /// very careful to avoid using it when iterators are either expensive or have
-    /// side effects.
+    /// TODO: This could also be done for cloneable iterators, though we would
+    /// need to be very careful to avoid using it when iterators are either
+    /// expensive or have side effects.
     pub fn pack_slice<'a, I, D>(slice: &[Datum<'a>]) -> Row {
         let needed = slice.iter().map(|d| datum_size(d)).sum();
         let mut packer = RowPacker::with_capacity(needed);
@@ -459,16 +488,17 @@ impl Row {
         packer.finish()
     }
 
-    /// Unpack `self` into a `Vec<Datum>` for efficient random access.
+    /// Unpacks `self` into a `Vec<Datum>` for efficient random access.
     pub fn unpack(&self) -> Vec<Datum> {
-        // It's usually cheaper to unpack twice to figure out the right length than it is to grow the vec as we go
+        // It's usually cheaper to unpack twice to figure out the right length
+        // than it is to grow the vec as we go.
         let len = self.iter().count();
         let mut vec = Vec::with_capacity(len);
         vec.extend(self.iter());
         vec
     }
 
-    /// Return the first `Datum` in `self`
+    /// Decodes the first [`Datum`] in `self`.
     ///
     /// Panics if the `Row` is empty.
     pub fn unpack_first(&self) -> Datum {
@@ -482,7 +512,9 @@ impl Row {
         }
     }
 
-    /// For debugging only
+    /// Returns a pointer to the raw bytes in the row.
+    ///
+    /// This function is intended for debugging purposes only.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -531,7 +563,9 @@ impl<'a> DatumList<'a> {
         }
     }
 
-    /// For debugging only
+    /// Returns a pointer to the raw bytes in the list.
+    ///
+    /// This function is intended for debugging purposes only.
     pub fn data(&self) -> &'a [u8] {
         &self.data
     }
@@ -624,6 +658,7 @@ impl RowPacker {
         // TODO: Determine if this is the best default choice.
         Self::with_capacity(1024 * 16)
     }
+
     /// Allocates an empty row packer with a supplied capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         RowPacker {
@@ -670,7 +705,7 @@ impl RowPacker {
         self.data.extend(&*row.data);
     }
 
-    /// Finish packing and return a `Row`.
+    /// Finishes packing and return a `Row`.
     pub fn finish(self) -> Row {
         Row {
             // drop excess capacity
@@ -678,7 +713,7 @@ impl RowPacker {
         }
     }
 
-    /// Finish packing and return a `Row`.
+    /// Finishes packing and return a `Row`.
     ///
     /// Unlike [`RowPacker::finish`], this method uses `self.data` to right-size an
     /// allocation for the new `Row` copied from `self.data`, rather than
@@ -691,7 +726,7 @@ impl RowPacker {
         Row { data }
     }
 
-    /// Start packing a `DatumList`.
+    /// Starts packing a `DatumList`.
     ///
     /// Returns the starting offset, which needs to be passed to `finish_list`.
     ///
@@ -709,7 +744,7 @@ impl RowPacker {
         start
     }
 
-    /// Finish packing a [`DatumList`]
+    /// Finishes packing a [`DatumList`]
     ///
     /// # Safety
     /// See `start_list`
@@ -719,7 +754,7 @@ impl RowPacker {
         self.data[start..start + size_of::<usize>()].copy_from_slice(&len.to_le_bytes());
     }
 
-    /// Start packing a [`DatumDict`].
+    /// Starts packing a [`DatumDict`].
     ///
     /// Returns the starting offset, which needs to be passed to `finish_dict`.
     ///
@@ -737,7 +772,7 @@ impl RowPacker {
         start
     }
 
-    /// Finish packing a `DatumDict`
+    /// Finishes packing a `DatumDict`
     ///
     /// # Safety
     /// See `start_dict`
@@ -747,7 +782,7 @@ impl RowPacker {
         self.data[start..start + size_of::<usize>()].copy_from_slice(&len.to_le_bytes());
     }
 
-    /// Pack a [`DatumList`] with an arbitrary closure
+    /// Packs a [`DatumList`] with an arbitrary closure.
     ///
     /// See [`try_push_list_with`] for a version that can handle errors.
     ///
@@ -771,7 +806,7 @@ impl RowPacker {
         unsafe { self.finish_list(start) };
     }
 
-    /// Pack a [`DatumList`] with an arbitrary closure
+    /// Packs a [`DatumList`] with an arbitrary closure.
     ///
     /// Any error returned from the closure will be forwarded from this method. This owns
     /// the rowpacker and has the same api as [`try_push_dict_with`] so that they can be
@@ -800,7 +835,7 @@ impl RowPacker {
         })
     }
 
-    /// Pack a [`DatumDict`].
+    /// Packs a [`DatumDict`].
     ///
     /// See also [`try_push_dict_with`] if you need to be able to handle errors.
     ///
@@ -845,7 +880,7 @@ impl RowPacker {
         unsafe { self.finish_dict(start) };
     }
 
-    /// Pack a [`DatumDict`] with a closure that may have errors.
+    /// Packs a [`DatumDict`] with a closure that may error.
     ///
     /// Any error in the closure will be forwarded from this method, and you will lose
     /// access to the `RowPacker`, because it is no longer safe to use.
@@ -882,7 +917,7 @@ impl RowPacker {
         })
     }
 
-    /// Convenience function to push a `DatumList` from an iter of `Datum`s
+    /// Pushes a `DatumList` from an iter of `Datum`s.
     ///
     /// See [`push_dict_with`] if you need to be able to handle errors
     pub fn push_list<'a, I, D>(&mut self, iter: I)
@@ -897,7 +932,7 @@ impl RowPacker {
         });
     }
 
-    /// Convenience function to push a `DatumDict` from an iter of `(&str, Datum)` pairs
+    /// Pushes a `DatumDict` from an iter of `(&str, Datum)` pairs.
     ///
     /// See [`try_push_dict_with`] if you need to be able to handle errors
     pub fn push_dict<'a, I, D>(&mut self, iter: I)
@@ -913,7 +948,9 @@ impl RowPacker {
         })
     }
 
-    /// For debugging only
+    /// Returns a pointer to the raw bytes in the row packer.
+    ///
+    /// This function is intended for debugging purposes only.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -950,7 +987,7 @@ impl RowArena {
         }
     }
 
-    /// Take ownership of `row` for the lifetime of the arena
+    /// Takes ownership of `row` for the lifetime of the arena.
     pub fn push_row<'a>(&'a self, row: Row) -> &'a Row {
         let mut inner = self.inner.borrow_mut();
         inner.owned_rows.push(row);
@@ -961,7 +998,8 @@ impl RowArena {
         }
     }
 
-    /// Convenience function to make a new `Row` containing a single datum, and take ownership of it for the lifetime of the arena
+    /// Makes a new `Row` containing a single datum, and takes ownership of it
+    /// for the lifetime of the arena.
     ///
     /// ```
     /// # use repr::{RowArena, Datum};
