@@ -3244,7 +3244,7 @@ fn sql_value_to_datum<'a>(l: &'a Value) -> Result<(Datum<'a>, ScalarType), failu
         ),
         Value::Time(t) => (Datum::Time(strconv::parse_time(t)?), ScalarType::Time),
         Value::Interval(iv) => {
-            let mut i = strconv::parse_interval_w_disambiguator(&iv.value, iv.precision_low)?;
+            let mut i = strconv::parse_interval_disambiguated(&iv.value, iv.precision_low)?;
             i.truncate_high_fields(iv.precision_high);
             i.truncate_low_fields(iv.precision_low, iv.fsec_max_precision)?;
             (Datum::Interval(i), ScalarType::Interval)

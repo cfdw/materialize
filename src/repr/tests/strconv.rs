@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 
-use repr::datetime::DateTimeField;
-use repr::{strconv, Interval};
+use repr::adt::datetime::DateTimeField;
+use repr::adt::interval::Interval;
+use repr::strconv;
 
 #[test]
 fn test_parse_date() {
@@ -363,7 +364,7 @@ fn test_parse_interval_durationlike() {
         d: DateTimeField,
         expected: Interval,
     ) {
-        let actual = strconv::parse_interval_w_disambiguator(s, d).unwrap();
+        let actual = strconv::parse_interval_disambiguated(s, d).unwrap();
         assert_eq!(actual, expected);
     }
 }
@@ -441,7 +442,7 @@ fn test_parse_interval_full() {
         assert_eq!(actual, expected);
     }
     fn run_test_parse_interval_full_from_sql(s: &str, d: DateTimeField, expected: Interval) {
-        let actual = strconv::parse_interval_w_disambiguator(s, d).unwrap();
+        let actual = strconv::parse_interval_disambiguated(s, d).unwrap();
         assert_eq!(actual, expected);
     }
 }

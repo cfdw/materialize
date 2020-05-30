@@ -96,7 +96,7 @@ impl DateTimeField {
 /// Always starts with the value smaller than the current one.
 ///
 /// ```
-/// use repr::datetime::DateTimeField::*;
+/// use repr::adt::datetime::DateTimeField::*;
 /// let mut itr = Hour.into_iter();
 /// assert_eq!(itr.next(), Some(Minute));
 /// assert_eq!(itr.next(), Some(Second));
@@ -375,7 +375,7 @@ impl ParsedDateTime {
                 let nano: u32 = second
                     .fraction
                     .try_into()
-                    .map_err({ |e| p_err(e, "NANOSECOND") })?;
+                    .map_err(|e| p_err(e, "NANOSECOND"))?;
                 let second: u32 = second.unit.try_into().map_err(|e| p_err(e, "MINUTE"))?;
                 (second, nano)
             }

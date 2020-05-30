@@ -241,6 +241,9 @@ pub fn parse_date(s: &str) -> Result<NaiveDate, failure::Error> {
 }
 
 /// Writes a date to a buffer.
+///
+/// The date is formatted as `YYYY-MM-DD`, where each component will be padded
+/// with leading zeros to reach the specified width.
 pub fn format_date<F>(buf: &mut F, d: NaiveDate) -> Nestable
 where
     F: FormatBuffer,
@@ -429,8 +432,10 @@ fn parse_bytes_traditional(buf: &[u8]) -> Result<Vec<u8>, failure::Error> {
 /// # Examples
 ///
 /// ```rust
+/// # use repr::strconv;
 /// let mut buf = String::new();
-/// strconv::format_bytes(&mut buf, )
+/// strconv::format_bytes(&mut buf, b"hello");
+/// assert_eq!(buf, "\\x68656c6c6f");
 /// ```
 pub fn format_bytes<F>(buf: &mut F, bytes: &[u8]) -> Nestable
 where
@@ -441,6 +446,8 @@ where
 }
 
 /// Parses a JSON object from a string.
+///
+///
 pub fn parse_jsonb(s: &str) -> Result<Jsonb, failure::Error> {
     s.trim().parse()
 }
