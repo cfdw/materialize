@@ -7,6 +7,46 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use mz_metrics::{MetricsRegistry, UIntGauge, IntGauge, metric};
+
+#[derive(Clone, Debug)]
+pub struct Metrics {
+    pub kafka_max_available_offset: IntGauge,
+    pub source_count: UIntGauge,
+    pub view_count: UIntGauge,
+}
+
+impl Metrics {
+    pub fn register_into(registry: &MetricsRegistry) -> Metrics {
+        Metrics {
+            kafka_max_available_offset: registry.register(metric!(
+                name: "mz_kafka_partition_offset_max",
+                help: "The high watermark for a partition, the maximum offset that we could hope to ingest",
+                var_labels: ["topic", "source_id", "partition_id"],
+            )),
+            source_count: registry.register(metric!(
+                name: "mz_source_count",
+                help: "The number of user-defined sources of a given type currently in use.",
+                var_labels: ["type"],
+            )),
+            view_count: registry.register(metric!(
+                name: "mz_view_count",
+                help: "The number of user-defined views that are currently in use.",
+            ))
+        }
+    }
+}
+
+
+// Copyright Materialize, Inc. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Prometheus metrics that reflect the catalog
 
 use expr::GlobalId;

@@ -16,8 +16,8 @@ dataflow-types = { path = "../dataflow-types" }
 expr = { path = "../expr" }
 futures = "0.3.13"
 itertools = "0.9.0"
-lazy_static = "1.4.0"
 log = "0.4.13"
+mz-metrics = { path = "../metrics" }
 openssl = { version = "0.10.32", features = ["vendored"] }
 ordered-float = { version = "2.1.1", features = ["serde"] }
 ore = { path = "../ore" }

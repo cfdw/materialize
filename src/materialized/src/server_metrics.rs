@@ -20,9 +20,6 @@ use prometheus::{
 };
 use sysinfo::{ProcessorExt, SystemExt};
 
-pub const METRIC_SERVER_METADATA: &str = "mz_server_metadata_seconds";
-pub const METRIC_WORKER_COUNT: &str = "mz_server_metadata_timely_worker_threads";
-
 lazy_static! {
     static ref SERVER_METADATA_RAW: GaugeVec = register_gauge_vec!(
         METRIC_SERVER_METADATA,
@@ -57,12 +54,6 @@ lazy_static! {
             &system.get_total_memory().to_string(),
         ])
     };
-    pub static ref WORKER_COUNT: IntGaugeVec = register_int_gauge_vec!(
-        METRIC_WORKER_COUNT,
-        "number of timely workers materialized is running with",
-        &["count"]
-    )
-    .unwrap();
     static ref REQUEST_TIMES: IntGaugeVec = register_int_gauge_vec!(
         "mz_server_scrape_metrics_times",
         "how long it took to gather metrics, used for very low frequency high accuracy measures",

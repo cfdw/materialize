@@ -26,6 +26,7 @@ itertools = "0.9.0"
 lazy_static = "1.4.0"
 log = "0.4.13"
 mz-avro = { path = "../avro", features = ["snappy"] }
+mz-metrics = { path = "../metrics" }
 ore = { path = "../ore" }
 pgrepr = { path = "../pgrepr" }
 postgres-types = "0.2.0"

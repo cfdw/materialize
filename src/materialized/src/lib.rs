@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use compile_time_run::run_command_str;
 use futures::StreamExt;
+use mz_metrics::{MetricsRegistry, metric, UIntGauge};
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -30,6 +31,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 use build_info::BuildInfo;
 use coord::{CacheConfig, LoggingConfig, PersistenceConfig};
+use ore::cast::CastFrom;
 
 use crate::mux::Mux;
 
@@ -201,6 +203,18 @@ pub async fn serve(
         }
     };
 
+    let metrics_registry = MetricsRegistry::new();
+    metrics_registry.register::<UIntGauge>(metric!(
+        name: "mz_server_metadata_timely_worker_threads",
+        help: "number of timely worker threads",
+    ))
+    .set(u64::cast_from(workers));
+    metrics_registry.register::<UIntGauge>(metric!(
+        name: "mz_server_metadata_seconds",
+        help: "server metadata, value is uptime",
+        const_labels: { "build_time" => BUILD_TIME, "version" => VERSION, "build_sha" => BUILD_SHA},
+    ));
+
     // Set this metric once so that it shows up in the metric export.
     crate::server_metrics::WORKER_COUNT
         .with_label_values(&[&workers.to_string()])
@@ -244,6 +258,7 @@ pub async fn serve(
 
         let mut mux = Mux::new();
         mux.add_handler(pgwire::Server::new(pgwire::Config {
+            metrics_registry: &metrics_registry,
             tls: pgwire_tls,
             coord_client: coord_client.clone(),
         }));
