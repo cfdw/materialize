@@ -578,44 +578,20 @@ where
     let mut key: Vec<_> = (0..outer.arity()).collect();
     let mut new_col_map = col_map.enter_scope(outer.arity() - col_map.len());
 
-    let mut zero_references = true;
-    inner.visit_columns(0, &mut |depth, col| {
-        if col.level > depth {
-            zero_references = false;
-        }
-    });
-    if zero_references {
-        key.clear();
-        new_col_map.inner.clear();
-    }
-
     outer.let_in(id_gen, |id_gen, get_outer| {
-        let keyed_outer = if key.is_empty() {
-            // Don't depend on outer at all if the branch is not correlated,
-            // which yields vastly better query plans. Note that this is a bit
-            // weird in that the branch will be computed even if outer has no
-            // rows, whereas if it had been correlated it would not (and *could*
-            // not) have been computed if outer had no rows, but the callers of
-            // this function don't mind these somewhat-weird semantics.
-            expr::RelationExpr::constant(vec![vec![]], RelationType::new(vec![]))
-        } else {
-            get_outer.clone().distinct_by(key.clone())
-        };
-        keyed_outer.let_in(id_gen, |id_gen, get_keyed_outer| {
-            let oa = get_outer.arity();
-            let branch = apply(id_gen, inner, get_keyed_outer, &new_col_map);
-            let ba = branch.arity();
-            let joined = expr::RelationExpr::join(
-                vec![get_outer.clone(), branch],
-                key.iter()
-                    .enumerate()
-                    .map(|(i, &k)| vec![(0, k), (1, i)])
-                    .collect(),
-            )
-            // throw away the right-hand copy of the key we just joined on
-            .project((0..oa).chain((oa + key.len())..(oa + ba)).collect());
-            joined
-        })
+        let oa = get_outer.arity();
+        let branch = apply(id_gen, inner, get_outer.clone(), &new_col_map);
+        let ba = branch.arity();
+        let joined = expr::RelationExpr::join(
+            vec![get_outer.clone(), branch],
+            key.iter()
+                .enumerate()
+                .map(|(i, &k)| vec![(0, k), (1, i)])
+                .collect(),
+        )
+        // throw away the right-hand copy of the key we just joined on
+        .project((0..oa).chain((oa + key.len())..(oa + ba)).collect());
+        joined
     })
 }
 
