@@ -572,26 +572,9 @@ fn branch<F>(
 where
     F: FnOnce(&mut expr::IdGen, RelationExpr, expr::RelationExpr, &ColumnMap) -> expr::RelationExpr,
 {
-    // Use all columns of outer as the key, even though the nested query may not
-    // actually refer to all outer columns. This eases optimizations down the
-    // line.
-    let mut key: Vec<_> = (0..outer.arity()).collect();
     let mut new_col_map = col_map.enter_scope(outer.arity() - col_map.len());
-
     outer.let_in(id_gen, |id_gen, get_outer| {
-        let oa = get_outer.arity();
-        let branch = apply(id_gen, inner, get_outer.clone(), &new_col_map);
-        let ba = branch.arity();
-        let joined = expr::RelationExpr::join(
-            vec![get_outer.clone(), branch],
-            key.iter()
-                .enumerate()
-                .map(|(i, &k)| vec![(0, k), (1, i)])
-                .collect(),
-        )
-        // throw away the right-hand copy of the key we just joined on
-        .project((0..oa).chain((oa + key.len())..(oa + ba)).collect());
-        joined
+        apply(id_gen, inner, get_outer.clone(), &new_col_map)
     })
 }
 
