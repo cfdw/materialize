@@ -34,9 +34,10 @@
 //! contain "holes" from prepared statements, as if the query was a subquery
 //! against a relation containing the assignments of values to those holes.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use anyhow::bail;
+use itertools::Itertools;
 
 use ore::collections::CollectionExt;
 use repr::RelationType;
@@ -79,6 +80,32 @@ impl ColumnMap {
 
     fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Updates references in the `ColumnMap` for use in a nested scope. The
+    /// provided `arity` must specify the arity of the current scope.
+    fn enter_scope(&self, arity: usize) -> ColumnMap {
+        // From the perspective of the nested scope, all existing column
+        // references will be one level greater.
+        let existing = self
+            .inner
+            .clone()
+            .into_iter()
+            .update(|(col, _i)| col.level += 1);
+
+        // All columns in the current scope become explicit entries in the
+        // immediate parent scope.
+        let new = (0..arity).map(|i| {
+            (
+                ColumnRef {
+                    level: 1,
+                    column: i,
+                },
+                self.len() + i,
+            )
+        });
+
+        ColumnMap::new(existing.chain(new).collect())
     }
 }
 
@@ -545,38 +572,22 @@ fn branch<F>(
 where
     F: FnOnce(&mut expr::IdGen, RelationExpr, expr::RelationExpr, &ColumnMap) -> expr::RelationExpr,
 {
-    // TODO: It would be nice to have a version of this code w/o optimizations,
-    // at the least for purposes of understanding. It was difficult for one reader
-    // to understand the required properties of `outer` and `col_map`.
+    // Use all columns of outer as the key, even though the nested query may not
+    // actually refer to all outer columns. This eases optimizations down the
+    // line.
+    let mut key: Vec<_> = (0..outer.arity()).collect();
+    let mut new_col_map = col_map.enter_scope(outer.arity() - col_map.len());
 
-    // The key consists of the columns from the outer expression upon which the
-    // inner relation depends. We discover these dependencies by walking the
-    // inner relation expression and looking for column references whose level
-    // escapes inner.
-    //
-    // At the end of this process, `key` contains the decorrelated position of
-    // each outer column, according to the passed-in `col_map`, and
-    // `new_col_map` maps each outer column to its new ordinal position in key.
-    let mut outer_cols = BTreeSet::new();
+    let mut zero_references = true;
     inner.visit_columns(0, &mut |depth, col| {
-        // Test if the column reference escapes the subquery.
         if col.level > depth {
-            outer_cols.insert(ColumnRef {
-                level: col.level - depth,
-                column: col.column,
-            });
+            zero_references = false;
         }
     });
-    let mut new_col_map = HashMap::new();
-    let mut key = vec![];
-    for col in outer_cols {
-        new_col_map.insert(col, key.len());
-        key.push(col_map.get(&ColumnRef {
-            level: col.level - 1,
-            column: col.column,
-        }));
+    if zero_references {
+        key.clear();
+        new_col_map.inner.clear();
     }
-    let new_col_map = ColumnMap::new(new_col_map);
 
     outer.let_in(id_gen, |id_gen, get_outer| {
         let keyed_outer = if key.is_empty() {
