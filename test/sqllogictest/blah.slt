@@ -1,0 +1,416 @@
+query T multiline
+EXPLAIN RAW PLAN FOR (VALUES (
+  1 < ALL(SELECT * FROM (VALUES (1)) WHERE false),
+  1 < ALL(VALUES (0)),
+  1 < ALL(VALUES (2)),
+  NULL < ALL(SELECT * FROM (VALUES (1)) WHERE false)
+))
+----
+%0 =
+| Constant
+
+%1 =
+| Constant ()
+| Map select(%5), select(%9), select(%13), select(%17)
+| |
+| | %3 =
+| | | Constant
+| |
+| | %4 =
+| | | Constant ()
+| | | Map 1
+| |
+| | %5 =
+| | | Union %3 %4
+| | | Filter false
+| | | Reduce group=() all((1 < #0))
+| |
+| |
+| | %7 =
+| | | Constant
+| |
+| | %8 =
+| | | Constant ()
+| | | Map 0
+| |
+| | %9 =
+| | | Union %7 %8
+| | | Reduce group=() all((1 < #0))
+| |
+| |
+| | %11 =
+| | | Constant
+| |
+| | %12 =
+| | | Constant ()
+| | | Map 2
+| |
+| | %13 =
+| | | Union %11 %12
+| | | Reduce group=() all((1 < #0))
+| |
+| |
+| | %15 =
+| | | Constant
+| |
+| | %16 =
+| | | Constant ()
+| | | Map 1
+| |
+| | %17 =
+| | | Union %15 %16
+| | | Filter false
+| | | Reduce group=() all((null < #0))
+| |
+
+%2 =
+| Union %0 %1
+
+EOF
+
+query T multiline
+EXPLAIN DECORRELATED PLAN FOR (VALUES (
+  1 < ALL(SELECT * FROM (VALUES (1)) WHERE false),
+  1 < ALL(VALUES (0)),
+  1 < ALL(VALUES (2)),
+  NULL < ALL(SELECT * FROM (VALUES (1)) WHERE false)
+))
+----
+%0 =
+| Constant ()
+
+%1 =
+| Get %0
+
+%2 =
+| Constant
+
+%3 =
+| Join %1 %2
+| | implementation = Unimplemented
+
+%4 =
+| Get %0
+
+%5 =
+| Constant ()
+
+%6 =
+| Join %4 %5
+| | implementation = Unimplemented
+
+%7 =
+| Get %6
+
+%8 =
+| Constant
+
+%9 =
+| Join %7 %8
+| | implementation = Unimplemented
+
+%10 =
+| Get %6
+
+%11 =
+| Constant ()
+
+%12 =
+| Join %10 %11
+| | implementation = Unimplemented
+| Map 1
+
+%13 =
+| Union %9 %12
+| Filter false
+| Filter (!((1 < #0)) || isnull((1 < #0)))
+| Distinct group=()
+
+%14 =
+| Constant (true)
+
+%15 =
+| Join %13 %14
+| | implementation = Unimplemented
+
+%16 =
+| Get %15
+
+%17 =
+| Get %15
+| Distinct group=()
+| Negate
+
+%18 =
+| Get %6
+| Distinct group=()
+
+%19 =
+| Union %17 %18
+
+%20 =
+| Get %6
+
+%21 =
+| Join %19 %20
+| | implementation = Unimplemented
+| Project ()
+
+%22 =
+| Constant (false)
+
+%23 =
+| Join %21 %22
+| | implementation = Unimplemented
+
+%24 =
+| Union %16 %23
+| Map !(#0)
+| Project (#1)
+
+%25 =
+| Get %24
+
+%26 =
+| Constant
+
+%27 =
+| Join %25 %26
+| | implementation = Unimplemented
+
+%28 =
+| Get %24
+
+%29 =
+| Constant ()
+
+%30 =
+| Join %28 %29
+| | implementation = Unimplemented
+| Map 0
+
+%31 =
+| Union %27 %30
+| Filter (!((1 < #1)) || isnull((1 < #1)))
+| Distinct group=(#0)
+
+%32 =
+| Constant (true)
+
+%33 =
+| Join %31 %32
+| | implementation = Unimplemented
+
+%34 =
+| Get %33
+
+%35 =
+| Get %33
+| Distinct group=(#0)
+| Negate
+
+%36 =
+| Get %24
+| Distinct group=(#0)
+
+%37 =
+| Union %35 %36
+
+%38 =
+| Get %24
+
+%39 =
+| Join %37 %38 (= #0 #1)
+| | implementation = Unimplemented
+| Project (#0)
+
+%40 =
+| Constant (false)
+
+%41 =
+| Join %39 %40
+| | implementation = Unimplemented
+
+%42 =
+| Union %34 %41
+| Map !(#1)
+| Project (#0, #2)
+
+%43 =
+| Get %42
+
+%44 =
+| Constant
+
+%45 =
+| Join %43 %44
+| | implementation = Unimplemented
+
+%46 =
+| Get %42
+
+%47 =
+| Constant ()
+
+%48 =
+| Join %46 %47
+| | implementation = Unimplemented
+| Map 2
+
+%49 =
+| Union %45 %48
+| Filter (!((1 < #2)) || isnull((1 < #2)))
+| Distinct group=(#0, #1)
+
+%50 =
+| Constant (true)
+
+%51 =
+| Join %49 %50
+| | implementation = Unimplemented
+
+%52 =
+| Get %51
+
+%53 =
+| Get %51
+| Distinct group=(#0, #1)
+| Negate
+
+%54 =
+| Get %42
+| Distinct group=(#0, #1)
+
+%55 =
+| Union %53 %54
+
+%56 =
+| Get %42
+
+%57 =
+| Join %55 %56 (= #0 #2) (= #1 #3)
+| | implementation = Unimplemented
+| Project (#0, #1)
+
+%58 =
+| Constant (false)
+
+%59 =
+| Join %57 %58
+| | implementation = Unimplemented
+
+%60 =
+| Union %52 %59
+| Map !(#2)
+| Project (#0, #1, #3)
+
+%61 =
+| Get %60
+
+%62 =
+| Constant
+
+%63 =
+| Join %61 %62
+| | implementation = Unimplemented
+
+%64 =
+| Get %60
+
+%65 =
+| Constant ()
+
+%66 =
+| Join %64 %65
+| | implementation = Unimplemented
+| Map 1
+
+%67 =
+| Union %63 %66
+| Filter false
+| Reduce group=(#0, #1, #2) all((null < #3))
+
+%68 =
+| Get %67
+
+%69 =
+| Get %67
+| Distinct group=(#0, #1, #2)
+| Negate
+
+%70 =
+| Get %60
+| Distinct group=(#0, #1, #2)
+
+%71 =
+| Union %69 %70
+
+%72 =
+| Get %60
+
+%73 =
+| Join %71 %72 (= #0 #3) (= #1 #4) (= #2 #5)
+| | implementation = Unimplemented
+| Project (#0..#2)
+
+%74 =
+| Constant (true)
+
+%75 =
+| Join %73 %74
+| | implementation = Unimplemented
+
+%76 =
+| Union %68 %75
+
+%77 =
+| Get %76
+
+%78 =
+| Get %76
+| Distinct group=(#0, #1, #2)
+| Negate
+
+%79 =
+| Get %60
+| Distinct group=(#0, #1, #2)
+
+%80 =
+| Union %78 %79
+
+%81 =
+| Get %60
+
+%82 =
+| Join %80 %81 (= #0 #3) (= #1 #4) (= #2 #5)
+| | implementation = Unimplemented
+| Project (#0..#2)
+
+%83 =
+| Constant (null)
+
+%84 =
+| Join %82 %83
+| | implementation = Unimplemented
+
+%85 =
+| Union %77 %84
+| Map #3
+| Project (#0..#2, #4)
+
+%86 =
+| Union %3 %85
+
+EOF
+
+# mode cockroach
+#
+# query BBBBBBBBBBBBBBB
+# (VALUES (
+#   1 < ALL(SELECT * FROM (VALUES (1)) WHERE false),
+#   1 < ALL(VALUES (0)),
+#   1 < ALL(VALUES (2)),
+#   NULL < ALL(SELECT * FROM (VALUES (1)) WHERE false)
+# ))
+# ----
+# true  false  false  true  false  false  NULL  true  NULL  NULL  NULL  NULL  NULL

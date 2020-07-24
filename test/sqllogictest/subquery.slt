@@ -166,26 +166,26 @@ query BBBBBBBBBBBBBBB
 ----
 false  false  false  true  NULL  NULL  true  false  NULL  NULL  NULL  NULL  NULL  NULL  NULL
 
-# query BBBBBBBBBBBBBBB
-# (VALUES (
-#   1 < ALL(SELECT * FROM (VALUES (1)) WHERE false),
-#   1 < ALL(VALUES (0)),
-#   1 < ALL(VALUES (1)),
-#   1 < ALL(VALUES (2)),
-#   1 < ALL(VALUES (0), (NULL)),
-#   1 < ALL(VALUES (1), (NULL)),
-#   1 < ALL(VALUES (2), (NULL)),
-#   NULL < ALL(SELECT * FROM (VALUES (1)) WHERE false),
-#   NULL < ALL(VALUES (0)),
-#   NULL < ALL(VALUES (1)),
-#   NULL < ALL(VALUES (2)),
-#   NULL < ALL(VALUES (NULL)),
-#   NULL < ALL(VALUES (0), (NULL)),
-#   NULL < ALL(VALUES (1), (NULL)),
-#   NULL < ALL(VALUES (2), (NULL))
-# ))
-# ----
-# true  false  false  true  false  false  NULL  true  NULL  NULL  NULL  NULL  NULL  NULL  NULL
+query BBBBBBBBBBBBBBB
+(VALUES (
+  1 < ALL(SELECT * FROM (VALUES (1)) WHERE false),
+  1 < ALL(VALUES (0)),
+  1 < ALL(VALUES (1)),
+  1 < ALL(VALUES (2)),
+  1 < ALL(VALUES (0), (NULL)),
+  1 < ALL(VALUES (1), (NULL)),
+  1 < ALL(VALUES (2), (NULL)),
+  NULL < ALL(SELECT * FROM (VALUES (1)) WHERE false),
+  NULL < ALL(VALUES (0)),
+  NULL < ALL(VALUES (1)),
+  NULL < ALL(VALUES (2)),
+  NULL < ALL(VALUES (NULL)),
+  NULL < ALL(VALUES (0), (NULL)),
+  NULL < ALL(VALUES (1), (NULL)),
+  NULL < ALL(VALUES (2), (NULL))
+))
+----
+true  false  false  true  false  false  NULL  true  NULL  NULL  NULL  NULL  NULL  NULL  NULL
 
 # TODO(benesch): this should yield a nullary result set, but presently
 # fails.
