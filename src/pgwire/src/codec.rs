@@ -118,17 +118,20 @@ where
     ///
     /// As with [`FramedConn::send`], the connection is not flushed after
     /// calling this method. You must call [`FramedConn::flush`] explicitly.
-    /// Returns an error if the underlying connection is broken.
+    /// Returns the number of messages sent and an error if the underlying
+    /// connection is broken.
     pub async fn send_all(
         &mut self,
         messages: impl IntoIterator<Item = BackendMessage>,
-    ) -> Result<(), io::Error> {
+    ) -> Result<usize, io::Error> {
+        let mut sent = 0;
         // N.B. we intentionally don't use `self.conn.send_all` here to avoid
         // flushing the sink unnecessarily.
         for m in messages {
             self.send(m).await?;
+            sent += 1;
         }
-        Ok(())
+        Ok(sent)
     }
 
     /// Flushes all outstanding messages.

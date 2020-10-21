@@ -7,13 +7,12 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::cmp;
 use std::convert::TryFrom;
 use std::iter;
 use std::time::Instant;
 
 use byteorder::{ByteOrder, NetworkEndian};
-use futures::stream::StreamExt;
+use futures::stream::{self, StreamExt};
 use itertools::izip;
 use lazy_static::lazy_static;
 use log::debug;
@@ -672,7 +671,13 @@ where
                     }
                     PeekResponse::Error(text) => self.error(SqlState::INTERNAL_ERROR, text).await,
                     PeekResponse::Rows(rows) => {
-                        self.send_rows(row_desc, portal_name, rows, max_rows).await
+                        self.send_rows(
+                            row_desc,
+                            portal_name,
+                            Box::new(stream::iter(vec![Ok(rows)])),
+                            max_rows,
+                        )
+                        .await
                     }
                 }
             }
@@ -702,7 +707,8 @@ where
             ExecuteResponse::Tailing { rx } => {
                 let row_desc =
                     row_desc.expect("missing row description for ExecuteResponse::Tailing");
-                self.stream_rows(row_desc, rx).await
+                self.send_rows(row_desc, portal_name, Box::new(rx), max_rows)
+                    .await
             }
             ExecuteResponse::Updated(n) => command_complete!("UPDATE {}", n),
             ExecuteResponse::AlteredObject(o) => command_complete!("ALTER {}", o),
@@ -714,7 +720,9 @@ where
         &mut self,
         row_desc: RelationDesc,
         portal_name: String,
-        mut rows: Vec<Row>,
+        mut rows: Box<
+            dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin + Sync,
+        >,
         max_rows: usize,
     ) -> Result<State, comm::Error> {
         let portal = self
@@ -723,7 +731,12 @@ where
             .get_portal_mut(&portal_name)
             .expect("valid portal name for send rows");
 
-        if let Some(row) = rows.first() {
+        let mut batch = rows.next().await;
+        let first: Option<&Row> = match &batch {
+            Some(Ok(rows)) => rows.first(),
+            _ => None,
+        };
+        if let Some(row) = first {
             let datums = row.unpack();
             let col_types = &row_desc.typ().column_types;
             if datums.len() != col_types.len() {
@@ -763,17 +776,34 @@ where
                 .collect(),
         );
 
-        let nrows = cmp::min(max_rows, rows.len());
-        self.conn
-            .send_all(rows.drain(..nrows).map(move |row| {
-                BackendMessage::DataRow(pgrepr::values_from_row(row, row_desc.typ()))
-            }))
-            .await?;
-        ROWS_RETURNED.inc_by(u64::cast_from(nrows));
+        let mut total_sent_rows = 0;
+        let mut take_rows = if max_rows == 0 { usize::MAX } else { max_rows };
+
+        while let Some(batch_rows) = batch {
+            let mut batch_rows = batch_rows?;
+            let sent_rows = self
+                .conn
+                .send_all(batch_rows.drain(..take_rows).map(|row| {
+                    BackendMessage::DataRow(pgrepr::values_from_row(row, row_desc.typ()))
+                }))
+                .await?;
+            total_sent_rows += sent_rows;
+            take_rows -= sent_rows;
+            // If we have sent the number of request rows, put the remainder of the batch
+            // back into rows.
+            if take_rows == 0 {
+                rows = Box::new(stream::iter(vec![Ok(batch_rows)]).chain(rows));
+                break;
+            }
+            batch = rows.next().await;
+        }
+
+        ROWS_RETURNED.inc_by(u64::cast_from(total_sent_rows));
 
         // Always return rows back, even if it's empty. This prevents an unclosed
-        // portal from re-executing after it has been emptied.
-        portal.set_remaining_rows(rows);
+        // portal from re-executing after it has been emptied. into_inner unwraps the
+        // Take.
+        portal.set_remaining_rows(Box::new(rows));
 
         // If max_rows is not specified, we will always send back a CommandComplete. If
         // max_rows is specified, we only send CommandComplete if there were more rows
@@ -781,10 +811,10 @@ where
         // were remaining before sending (not that are remaining after sending), then
         // we still send a PortalSuspended. The number of remaining rows after the rows
         // have been sent doesn't matter. This matches postgres.
-        if max_rows == 0 || max_rows > nrows {
+        if max_rows == 0 || max_rows > total_sent_rows {
             self.conn
                 .send(BackendMessage::CommandComplete {
-                    tag: format!("SELECT {}", nrows),
+                    tag: format!("SELECT {}", total_sent_rows),
                 })
                 .await?;
         } else {
