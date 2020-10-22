@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0.
 
 use std::convert::TryFrom;
+use std::future::Future;
 use std::iter;
 use std::time::Instant;
 
@@ -83,25 +84,27 @@ pub struct StateMachine<A> {
 
 impl<A> StateMachine<A>
 where
-    A: AsyncRead + AsyncWrite + Unpin,
+    A: AsyncRead + AsyncWrite + Send + Unpin,
 {
-    pub async fn run(
+    pub fn run(
         mut self,
         version: i32,
         params: Vec<(String, String)>,
-    ) -> Result<(), comm::Error> {
-        let mut state = self.startup(version, params).await?;
+    ) -> impl Future<Output = Result<(), comm::Error>> + Send {
+        async move {
+            let mut state = self.startup(version, params).await?;
 
-        loop {
-            state = match state {
-                State::Ready => self.advance_ready().await?,
-                State::Drain => self.advance_drain().await?,
-                State::Done => break,
+            loop {
+                state = match state {
+                    State::Ready => self.advance_ready().await?,
+                    State::Drain => self.advance_drain().await?,
+                    State::Done => break,
+                }
             }
-        }
 
-        self.coord_client.terminate().await;
-        Ok(())
+            self.coord_client.terminate().await;
+            Ok(())
+        }
     }
 
     async fn advance_ready(&mut self) -> Result<State, comm::Error> {
@@ -387,11 +390,11 @@ where
         raw_params: Vec<Option<Vec<u8>>>,
         result_formats: Vec<pgrepr::Format>,
     ) -> Result<State, comm::Error> {
-        let stmt = match self
+        let stmt = self
             .coord_client
             .session()
-            .get_prepared_statement(&statement_name)
-        {
+            .get_prepared_statement(&statement_name);
+        let stmt = match stmt {
             Some(stmt) => stmt,
             None => {
                 return self
@@ -498,7 +501,8 @@ where
     }
 
     async fn describe_statement(&mut self, name: String) -> Result<State, comm::Error> {
-        match self.coord_client.session().get_prepared_statement(&name) {
+        let stmt = self.coord_client.session().get_prepared_statement(&name);
+        match stmt {
             Some(stmt) => {
                 self.conn
                     .send(BackendMessage::ParameterDescription(
@@ -519,19 +523,21 @@ where
     }
 
     async fn describe_portal(&mut self, name: String) -> Result<State, comm::Error> {
-        let portal = match self.coord_client.session().get_portal(&name) {
-            Some(portal) => portal,
+        let stmt_name = self
+            .coord_client
+            .session()
+            .get_portal(&name)
+            .map(|portal| portal.statement_name.clone());
+        match stmt_name {
+            Some(stmt_name) => self.send_describe_rows(stmt_name).await,
             None => {
-                return self
-                    .error(
-                        SqlState::INVALID_SQL_STATEMENT_NAME,
-                        "portal does not exist",
-                    )
-                    .await
+                self.error(
+                    SqlState::INVALID_SQL_STATEMENT_NAME,
+                    "portal does not exist",
+                )
+                .await
             }
-        };
-        let stmt_name = portal.statement_name.clone();
-        self.send_describe_rows(stmt_name).await
+        }
     }
 
     async fn close_statement(&mut self, name: String) -> Result<State, comm::Error> {
@@ -552,10 +558,9 @@ where
     }
 
     async fn sync(&mut self) -> Result<State, comm::Error> {
+        let txn_state = self.coord_client.session().transaction().into();
         self.conn
-            .send(BackendMessage::ReadyForQuery(
-                self.coord_client.session().transaction().into(),
-            ))
+            .send(BackendMessage::ReadyForQuery(txn_state))
             .await?;
         self.flush().await
     }
@@ -720,9 +725,7 @@ where
         &mut self,
         row_desc: RelationDesc,
         portal_name: String,
-        mut rows: Box<
-            dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin + Sync,
-        >,
+        mut rows: Box<dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin>,
         max_rows: usize,
     ) -> Result<State, comm::Error> {
         let portal = self

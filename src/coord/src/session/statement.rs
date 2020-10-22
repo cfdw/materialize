@@ -104,16 +104,15 @@ pub struct Portal {
     pub result_formats: Vec<pgrepr::Format>,
     /// The rows that have yet to be delivered to the client, if the portal is
     /// partially executed.
-    pub remaining_rows: Option<
-        Box<dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin + Sync>,
-    >,
+    pub remaining_rows:
+        Option<Box<dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin>>,
 }
 
 impl Portal {
     /// Sets the remaining rows for this portal.
     pub fn set_remaining_rows(
         &mut self,
-        rows: Box<dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin + Sync>,
+        rows: Box<dyn futures::Stream<Item = Result<Vec<Row>, comm::Error>> + Send + Unpin>,
     ) {
         self.remaining_rows = Some(rows);
     }
