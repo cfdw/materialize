@@ -42,8 +42,8 @@ use sql_parser::ast::{
     CreateSinkStatement, CreateSourceStatement, CreateTableStatement, CreateViewStatement,
     DropDatabaseStatement, DropObjectsStatement, ExplainStage, ExplainStatement, Explainee, Expr,
     Format, Ident, IfExistsBehavior, InsertStatement, ObjectName, ObjectType, Query,
-    SelectStatement, SetVariableStatement, SetVariableValue, ShowVariableStatement, SqlOption,
-    Statement, TailStatement, Value, WithOption, WithOptionValue,
+    SelectStatement, ShowVariableStatement, SqlOption, Statement, TailStatement, Value, WithOption,
+    WithOptionValue,
 };
 
 use crate::catalog::{Catalog, CatalogItemType};
@@ -59,6 +59,7 @@ use crate::plan::{
 use crate::pure::Schema;
 
 mod show;
+mod var;
 
 /// Describes the output of a SQL statement.
 #[derive(Debug, Clone)]
@@ -308,8 +309,8 @@ pub fn handle_statement(
         Statement::ShowObjects(stmt) => show::show_objects(scx, stmt)?.handle(),
         Statement::ShowIndexes(stmt) => show::show_indexes(scx, stmt)?.handle(),
 
-        Statement::SetVariable(stmt) => handle_set_variable(scx, stmt),
-        Statement::ShowVariable(stmt) => handle_show_variable(scx, stmt),
+        Statement::SetVariable(stmt) => var::handle_set_variable(scx, stmt),
+        Statement::ShowVariable(stmt) => var::handle_show_variable(scx, stmt),
 
         Statement::Explain(stmt) => handle_explain(scx, stmt, params),
         Statement::Select(stmt) => handle_select(scx, stmt, params, None),
@@ -325,38 +326,6 @@ pub fn handle_statement(
         Statement::Update(_) => bail!("UPDATE statements are not supported"),
         Statement::Delete(_) => bail!("DELETE statements are not supported"),
         Statement::SetTransaction(_) => bail!("SET TRANSACTION statements are not supported"),
-    }
-}
-
-fn handle_set_variable(
-    _: &StatementContext,
-    SetVariableStatement {
-        local,
-        variable,
-        value,
-    }: SetVariableStatement,
-) -> Result<Plan, anyhow::Error> {
-    if local {
-        unsupported!("SET LOCAL");
-    }
-    Ok(Plan::SetVariable {
-        name: variable.to_string(),
-        value: match value {
-            SetVariableValue::Literal(Value::String(s)) => s,
-            SetVariableValue::Literal(lit) => lit.to_string(),
-            SetVariableValue::Ident(ident) => ident.into_string(),
-        },
-    })
-}
-
-fn handle_show_variable(
-    _: &StatementContext,
-    ShowVariableStatement { variable }: ShowVariableStatement,
-) -> Result<Plan, anyhow::Error> {
-    if variable.as_str() == unicase::Ascii::new("ALL") {
-        Ok(Plan::ShowAllVariables)
-    } else {
-        Ok(Plan::ShowVariable(variable.to_string()))
     }
 }
 
