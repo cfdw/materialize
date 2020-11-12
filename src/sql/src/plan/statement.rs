@@ -1700,7 +1700,11 @@ fn handle_select(
     params: &Params,
     copy_to: Option<CopyFormat>,
 ) -> Result<Plan, anyhow::Error> {
-    let (relation_expr, _, finishing) = handle_query(scx, query, params, QueryLifetime::OneShot)?;
+    let (mut relation_expr, desc, finishing) =
+        query::plan_root_query(scx, query, QueryLifetime::OneShot)?;
+    relation_expr.bind_parameters(&params)?;
+    let relation_expr = relation_expr.decorrelate();
+
     let when = match as_of.map(|e| query::eval_as_of(scx, e)).transpose()? {
         Some(ts) => PeekWhen::AtTimestamp(ts),
         None => PeekWhen::Immediately,
@@ -1772,19 +1776,6 @@ fn handle_explain(
         stage,
         options,
     })
-}
-
-/// Plans and decorrelates a `Query`. Like `query::plan_root_query`, but returns
-/// an `::expr::RelationExpr`, which cannot include correlated expressions.
-fn handle_query(
-    scx: &StatementContext,
-    query: Query,
-    params: &Params,
-    lifetime: QueryLifetime,
-) -> Result<(::expr::RelationExpr, RelationDesc, RowSetFinishing), anyhow::Error> {
-    let (mut expr, desc, finishing) = query::plan_root_query(scx, query, lifetime)?;
-    expr.bind_parameters(&params)?;
-    Ok((expr.decorrelate(), desc, finishing))
 }
 
 /// Whether a SQL object type can be interpreted as matching the type of the given catalog item.
