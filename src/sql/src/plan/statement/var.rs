@@ -9,8 +9,7 @@
 
 //! Handlers for `SET <var>` and `SHOW <var>` statements.
 
-use sql_parser::ast::{SetVariableStatement, SetVariableValue, ShowVariableStatement, Value};
-
+use crate::ast::{SetVariableStatement, SetVariableValue, ShowVariableStatement, Value};
 use crate::plan::statement::StatementContext;
 use crate::plan::Plan;
 

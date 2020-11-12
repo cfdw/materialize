@@ -29,7 +29,7 @@ use dataflow_types::{
     KafkaSinkConnectorBuilder, KafkaSourceConnector, KinesisSourceConnector, ProtobufEncoding,
     RegexEncoding, SinkConnectorBuilder, SourceConnector,
 };
-use expr::{GlobalId, RowSetFinishing};
+use expr::GlobalId;
 use interchange::avro::{self, DebeziumDeduplicationStrategy, Encoder};
 use ore::collections::CollectionExt;
 use ore::iter::IteratorExt;
@@ -37,13 +37,12 @@ use repr::{strconv, RelationDesc, RelationType, ScalarType};
 use sql_parser::ast::display::AstDisplay;
 use sql_parser::ast::{
     AlterIndexOptionsList, AlterIndexOptionsStatement, AlterObjectRenameStatement, AvroSchema,
-    ColumnOption, Connector, CopyDirection, CopyRelation, CopyStatement, CopyTarget,
-    CreateDatabaseStatement, CreateIndexStatement, CreateMapTypeStatement, CreateSchemaStatement,
-    CreateSinkStatement, CreateSourceStatement, CreateTableStatement, CreateViewStatement,
-    DropDatabaseStatement, DropObjectsStatement, ExplainStage, ExplainStatement, Explainee, Expr,
-    Format, Ident, IfExistsBehavior, InsertStatement, ObjectName, ObjectType, Query,
-    SelectStatement, ShowVariableStatement, SqlOption, Statement, TailStatement, Value, WithOption,
-    WithOptionValue,
+    ColumnOption, Connector, CopyRelation, CopyStatement, CreateDatabaseStatement,
+    CreateIndexStatement, CreateMapTypeStatement, CreateSchemaStatement, CreateSinkStatement,
+    CreateSourceStatement, CreateTableStatement, CreateViewStatement, DropDatabaseStatement,
+    DropObjectsStatement, ExplainStage, ExplainStatement, Explainee, Expr, Format, Ident,
+    IfExistsBehavior, InsertStatement, ObjectName, ObjectType, SelectStatement,
+    ShowVariableStatement, SqlOption, Statement, TailStatement, Value, WithOption, WithOptionValue,
 };
 
 use crate::catalog::{Catalog, CatalogItemType};
@@ -53,11 +52,12 @@ use crate::normalize;
 use crate::plan::error::PlanError;
 use crate::plan::query::QueryLifetime;
 use crate::plan::{
-    query, scalar_type_from_sql, AlterIndexLogicalCompactionWindow, CopyFormat, Index,
-    LogicalCompactionWindow, Params, PeekWhen, Plan, PlanContext, Sink, Source, Table, Type, View,
+    query, scalar_type_from_sql, AlterIndexLogicalCompactionWindow, Index, LogicalCompactionWindow,
+    Params, Plan, PlanContext, Sink, Source, Table, Type, View,
 };
 use crate::pure::Schema;
 
+mod dml;
 mod show;
 mod var;
 
@@ -312,12 +312,11 @@ pub fn handle_statement(
         Statement::SetVariable(stmt) => var::handle_set_variable(scx, stmt),
         Statement::ShowVariable(stmt) => var::handle_show_variable(scx, stmt),
 
-        Statement::Explain(stmt) => handle_explain(scx, stmt, params),
-        Statement::Select(stmt) => handle_select(scx, stmt, params, None),
-        Statement::Tail(stmt) => handle_tail(scx, stmt, None),
-        Statement::Copy(stmt) => handle_copy(scx, stmt),
-
-        Statement::Insert(stmt) => handle_insert(scx, stmt, params),
+        Statement::Explain(stmt) => dml::handle_explain(scx, stmt, params),
+        Statement::Select(stmt) => dml::handle_select(scx, stmt, params, None),
+        Statement::Tail(stmt) => dml::handle_tail(scx, stmt, None),
+        Statement::Copy(stmt) => dml::handle_copy(scx, stmt),
+        Statement::Insert(stmt) => dml::handle_insert(scx, stmt, params),
 
         Statement::StartTransaction(_) => Ok(Plan::StartTransaction),
         Statement::Rollback(_) => Ok(Plan::AbortTransaction),
@@ -326,71 +325,6 @@ pub fn handle_statement(
         Statement::Update(_) => bail!("UPDATE statements are not supported"),
         Statement::Delete(_) => bail!("DELETE statements are not supported"),
         Statement::SetTransaction(_) => bail!("SET TRANSACTION statements are not supported"),
-    }
-}
-
-fn handle_tail(
-    scx: &StatementContext,
-    TailStatement {
-        name,
-        options,
-        as_of,
-    }: TailStatement,
-    copy_to: Option<CopyFormat>,
-) -> Result<Plan, anyhow::Error> {
-    let from = scx.resolve_item(name)?;
-    let entry = scx.catalog.get_item(&from);
-    let ts = as_of.map(|e| query::eval_as_of(scx, e)).transpose()?;
-    let options = TailOptions::try_from(options)?;
-
-    match entry.item_type() {
-        CatalogItemType::Table | CatalogItemType::Source | CatalogItemType::View => {
-            Ok(Plan::Tail {
-                id: entry.id(),
-                ts,
-                with_snapshot: options.snapshot.unwrap_or(true),
-                copy_to,
-                emit_progress: options.progress.unwrap_or(false),
-                object_columns: entry.desc()?.arity(),
-            })
-        }
-        CatalogItemType::Index | CatalogItemType::Sink | CatalogItemType::Type => bail!(
-            "'{}' cannot be tailed because it is a {}",
-            from,
-            entry.item_type(),
-        ),
-    }
-}
-
-fn handle_copy(
-    scx: &StatementContext,
-    CopyStatement {
-        relation,
-        direction,
-        target,
-        options,
-    }: CopyStatement,
-) -> Result<Plan, anyhow::Error> {
-    let options = CopyOptions::try_from(options)?;
-    let format = if let Some(format) = options.format {
-        match format.to_lowercase().as_str() {
-            "text" => CopyFormat::Text,
-            "csv" => CopyFormat::Csv,
-            "binary" => CopyFormat::Binary,
-            _ => bail!("unknown FORMAT: {}", format),
-        }
-    } else {
-        CopyFormat::Text
-    };
-    match (&direction, &target) {
-        (CopyDirection::To, CopyTarget::Stdout) => match relation {
-            CopyRelation::Table { .. } => bail!("table with COPY TO unsupported"),
-            CopyRelation::Select(stmt) => {
-                Ok(handle_select(scx, stmt, &Params::empty(), Some(format))?)
-            }
-            CopyRelation::Tail(stmt) => Ok(handle_tail(scx, stmt, Some(format))?),
-        },
-        _ => bail!("COPY {} {} not supported", direction, target),
     }
 }
 
@@ -1676,106 +1610,6 @@ fn handle_drop_item(
         }
     }
     Ok(Some(catalog_entry.id()))
-}
-
-fn handle_insert(
-    scx: &StatementContext,
-    InsertStatement {
-        table_name,
-        columns,
-        source,
-    }: InsertStatement,
-    params: &Params,
-) -> Result<Plan, anyhow::Error> {
-    let (id, mut expr) = query::plan_insert_query(scx, table_name, columns, source)?;
-    expr.bind_parameters(&params)?;
-    let expr = expr.decorrelate();
-
-    Ok(Plan::Insert { id, values: expr })
-}
-
-fn handle_select(
-    scx: &StatementContext,
-    SelectStatement { query, as_of }: SelectStatement,
-    params: &Params,
-    copy_to: Option<CopyFormat>,
-) -> Result<Plan, anyhow::Error> {
-    let (mut relation_expr, desc, finishing) =
-        query::plan_root_query(scx, query, QueryLifetime::OneShot)?;
-    relation_expr.bind_parameters(&params)?;
-    let relation_expr = relation_expr.decorrelate();
-
-    let when = match as_of.map(|e| query::eval_as_of(scx, e)).transpose()? {
-        Some(ts) => PeekWhen::AtTimestamp(ts),
-        None => PeekWhen::Immediately,
-    };
-
-    Ok(Plan::Peek {
-        source: relation_expr,
-        when,
-        finishing,
-        copy_to,
-    })
-}
-
-fn handle_explain(
-    scx: &StatementContext,
-    ExplainStatement {
-        stage,
-        explainee,
-        options,
-    }: ExplainStatement,
-    params: &Params,
-) -> Result<Plan, anyhow::Error> {
-    let is_view = matches!(explainee, Explainee::View(_));
-    let (scx, query) = match explainee {
-        Explainee::View(name) => {
-            let full_name = scx.resolve_item(name.clone())?;
-            let entry = scx.catalog.get_item(&full_name);
-            if entry.item_type() != CatalogItemType::View {
-                bail!(
-                    "Expected {} to be a view, not a {}",
-                    name,
-                    entry.item_type(),
-                );
-            }
-            let parsed = crate::parse::parse(entry.create_sql())
-                .expect("Sql for existing view should be valid sql");
-            let query = match parsed.into_last() {
-                Statement::CreateView(CreateViewStatement { query, .. }) => query,
-                _ => panic!("Sql for existing view should parse as a view"),
-            };
-            let scx = StatementContext {
-                pcx: entry.plan_cx(),
-                catalog: scx.catalog,
-                param_types: scx.param_types.clone(),
-            };
-            (scx, query)
-        }
-        Explainee::Query(query) => (scx.clone(), query),
-    };
-    // Previouly we would bail here for ORDER BY and LIMIT; this has been relaxed to silently
-    // report the plan without the ORDER BY and LIMIT decorations (which are done in post).
-    let (mut sql_expr, desc, finishing) =
-        query::plan_root_query(&scx, query, QueryLifetime::OneShot)?;
-    let finishing = if is_view {
-        // views don't use a separate finishing
-        sql_expr.finish(finishing);
-        None
-    } else if finishing.is_trivial(desc.arity()) {
-        None
-    } else {
-        Some(finishing)
-    };
-    sql_expr.bind_parameters(&params)?;
-    let expr = sql_expr.clone().decorrelate();
-    Ok(Plan::ExplainPlan {
-        raw_plan: sql_expr,
-        decorrelated_plan: expr,
-        row_set_finishing: finishing,
-        stage,
-        options,
-    })
 }
 
 /// Whether a SQL object type can be interpreted as matching the type of the given catalog item.

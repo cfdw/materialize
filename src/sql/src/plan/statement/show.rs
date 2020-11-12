@@ -13,16 +13,16 @@ use anyhow::bail;
 
 use ore::collections::CollectionExt;
 use repr::{Datum, Row};
-use sql_parser::ast::{
+
+use crate::ast::{
     ObjectName, ObjectType, SelectStatement, ShowColumnsStatement, ShowCreateIndexStatement,
     ShowCreateSinkStatement, ShowCreateSourceStatement, ShowCreateTableStatement,
     ShowCreateViewStatement, ShowDatabasesStatement, ShowIndexesStatement, ShowObjectsStatement,
     ShowStatementFilter, Statement, Value,
 };
-
 use crate::catalog::CatalogItemType;
 use crate::parse;
-use crate::plan::statement::{StatementContext, StatementDesc};
+use crate::plan::statement::{dml, StatementContext, StatementDesc};
 use crate::plan::{Params, Plan};
 
 pub fn handle_show_create_view(
@@ -497,6 +497,6 @@ impl<'a> ShowSelect<'a> {
 
     /// Converts this `ShowSelect` into a [`Plan`].
     pub fn handle(self) -> Result<Plan, anyhow::Error> {
-        super::handle_select(self.scx, self.stmt, &Params::empty(), None)
+        dml::handle_select(self.scx, self.stmt, &Params::empty(), None)
     }
 }
