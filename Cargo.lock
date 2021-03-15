@@ -1882,6 +1882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21163e139fa306126e6eedaf49ecdb4588f939600f0b1e770f4205ee4b7fa868"
 
 [[package]]
+<<<<<<< HEAD
 name = "futures-task"
 version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1890,6 +1891,27 @@ checksum = "57c66a976bf5909d801bbef33416c41372779507e7a6b3a5e25e4749c58f776a"
 [[package]]
 name = "futures-util"
 version = "0.3.21"
+=======
+name = "jackdaw"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fstrings",
+ "futures",
+ "json_comments",
+ "ore",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "walkdir",
+]
+
+[[package]]
+name = "jemalloc-ctl"
+version = "0.3.3"
+>>>>>>> blah
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b7abd5d659d9b90c8cba917f6ec750a74e2dc23902ef9cd4cc8c8b22e6036a"
 dependencies = [
@@ -1954,10 +1976,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78cc372d058dcf6d5ecd98510e7fbc9e5aec4d21de70f65fea8fecebcd881bd4"
 
 [[package]]
+<<<<<<< HEAD
 name = "glob"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b919933a397b79c37e33b77bb2aa3dc8eb6e165ad809e58ff75bc7db2e34574"
+=======
+name = "json_comments"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab25c689752fbb49903458495d3e71853229e262a2e6136325359e0705606483"
+
+[[package]]
+name = "kafka-util"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "ccsr",
+ "chrono",
+ "clap",
+ "futures",
+ "mz-avro",
+ "ore",
+ "rand 0.8.3",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "structopt",
+ "tokio",
+ "url",
+]
+>>>>>>> blah
 
 [[package]]
 name = "globset"
@@ -5517,9 +5566,15 @@ dependencies = [
 
 [[package]]
 name = "syn"
+<<<<<<< HEAD
 version = "1.0.86"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a65b3f4ffa0092e9887669db0eae07941f023991ab58ea44da8fe8e2d511c6b"
+=======
+version = "1.0.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fd9d1e9976102a03c542daa2eff1b43f9d72306342f3f8b3ed5fb8908195d6f"
+>>>>>>> blah
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5907,9 +5962,15 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
+<<<<<<< HEAD
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e99e1983e5d376cd8eb4b66604d2e99e79f5bd988c3055891dcd8c9e2604cc0"
+=======
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec31e5cc6b46e653cf57762f36f71d5e6386391d88a72fd6db4508f8f676fb29"
+>>>>>>> blah
 dependencies = [
  "bytes",
  "futures-core",

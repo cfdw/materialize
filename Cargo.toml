@@ -19,6 +19,7 @@ members = [
     "src/expr",
     "src/http-proxy",
     "src/interchange",
+    "src/jackdaw",
     "src/kafka-util",
     "src/lowertest-derive",
     "src/lowertest",
