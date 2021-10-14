@@ -20,6 +20,10 @@ skip-tree = [
     { name = "winauth", version = "0.0.4" },
 ]
 
+# glob is essentially abandoned. Use globset instead.
+[[bans.deny]]
+name = "glob"
+
 # Strum has suspect code quality and includes many unneeded features. Use
 # more targeted enum macro crates, e.g. `enum-kinds`.
 [[bans.deny]]
