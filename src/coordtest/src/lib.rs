@@ -85,13 +85,13 @@ use timely::progress::change_batch::ChangeBatch;
 /// when it receives messages. The dataflow server is started with a
 /// single worker, but it's feedback channel into the Coordinator is
 /// buffered (`dataflow_feedback_rx`), and only sent to the Coordinator
-/// (`coord_feedback_tx`) when specified, allowing us to control when uppers
+/// (`cmd_tx`) when specified, allowing us to control when uppers
 /// and sinces advance.
 //
 // The field order matters a lot here so the various threads/tasks are shut
 // down without ever panicing.
 pub struct CoordTest {
-    coord_feedback_tx: mpsc::UnboundedSender<dataflow::Response>,
+    cmd_tx: mpsc::UnboundedSender<coord::client::Command>,
     client: Option<Client>,
     _handle: JoinOnDropHandle<()>,
     dataflow_feedback_rx: mpsc::UnboundedReceiver<dataflow::Response>,
@@ -112,7 +112,7 @@ impl CoordTest {
     pub async fn new() -> anyhow::Result<Self> {
         let catalog_file = NamedTempFile::new()?;
         let metrics_registry = MetricsRegistry::new();
-        let (handle, client, coord_feedback_tx, dataflow_feedback_rx, timestamp) =
+        let (handle, client, cmd_tx, timestamp) =
             coord::serve_debug(catalog_file.path(), metrics_registry.clone());
         let coordtest = CoordTest {
             _handle: handle,

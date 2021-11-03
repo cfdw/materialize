@@ -50,17 +50,16 @@ use chrono::{DateTime, Utc};
 use derivative::Derivative;
 use differential_dataflow::lattice::Lattice;
 use futures::future::{self, FutureExt, TryFutureExt};
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 use lazy_static::lazy_static;
 use rand::Rng;
 use repr::adt::interval::Interval;
-use timely::communication::WorkerGuards;
 use timely::order::PartialOrder;
 use timely::progress::frontier::MutableAntichain;
 use timely::progress::{Antichain, ChangeBatch, Timestamp as _};
 use tokio::runtime::Handle as TokioHandle;
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::select;
+use tokio::sync::{mpsc, watch};
 
 use build_info::{BuildInfo, DUMMY_BUILD_INFO};
 use dataflow::{TimestampBindingFeedback, WorkerFeedback};
@@ -139,7 +138,6 @@ pub enum Message {
     ScrapeMetrics,
     SendDiffs(SendDiffs),
     WriteLockGrant(tokio::sync::OwnedMutexGuard<()>),
-    Shutdown,
 }
 
 #[derive(Derivative)]
@@ -208,8 +206,7 @@ pub struct LoggingConfig {
 
 /// Configures a coordinator.
 pub struct Config<'a> {
-    pub workers: usize,
-    pub timely_worker: timely::WorkerConfig,
+    pub dataflow_client: dataflow::Client,
     pub symbiosis_url: Option<&'a str>,
     pub logging: Option<LoggingConfig>,
     pub data_directory: &'a Path,
@@ -226,7 +223,7 @@ pub struct Config<'a> {
 
 /// Glues the external world to the Timely workers.
 pub struct Coordinator {
-    dataflow_client: DataflowClient,
+    dataflow_client: dataflow::Client,
     /// Optimizer instance for logical optimization of views.
     view_optimizer: Optimizer,
     catalog: Catalog,
@@ -286,57 +283,6 @@ pub struct Coordinator {
     write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Holds plans deferred due to write lock.
     write_lock_wait_group: VecDeque<DeferredPlan>,
-}
-
-/// State guarding the connection to dataflow workers.
-///
-/// This state is extracted from the coordinator to better reflection the abstraction boundary.
-/// Although it is present in the coordinator process / thread, it represents information best
-/// maintained by the dataflow module itself.
-pub struct DataflowClient {
-    /// Guards for worker threads.
-    worker_guards: WorkerGuards<()>,
-    /// Channels to broadcast commands to workers.
-    worker_txs: Vec<crossbeam_channel::Sender<dataflow::Command>>,
-}
-
-impl DataflowClient {
-    /// Creates a new dataflow client from connection objects.
-    pub fn new(
-        worker_guards: WorkerGuards<()>,
-        worker_txs: Vec<crossbeam_channel::Sender<dataflow::Command>>,
-    ) -> Self {
-        Self {
-            worker_guards,
-            worker_txs,
-        }
-    }
-
-    /// Reports the number of dataflow workers.
-    pub fn num_workers(&self) -> usize {
-        self.worker_txs.len()
-    }
-
-    /// Broadcasts a command to all dataflow workers.
-    fn broadcast(&self, cmd: dataflow::Command) {
-        log::trace!("Broadcasting dataflow command: {:?}", cmd);
-        let num_workers = self.num_workers();
-        if num_workers == 1 {
-            // This special case avoids a clone of the whole plan.
-            self.worker_txs[0]
-                .send(cmd)
-                .expect("worker command receiver should not drop first");
-        } else {
-            for (index, sendpoint) in self.worker_txs.iter().enumerate() {
-                sendpoint
-                    .send(cmd.clone_for_worker(index, self.num_workers()))
-                    .expect("worker command receiver should not drop first")
-            }
-        }
-        for handle in self.worker_guards.guards() {
-            handle.thread().unpark()
-        }
-    }
 }
 
 /// Metadata about an active connection.
@@ -609,36 +555,27 @@ impl Coordinator {
     /// You must call `bootstrap` before calling this method.
     async fn serve(
         mut self,
-        internal_cmd_rx: mpsc::UnboundedReceiver<Message>,
-        cmd_rx: mpsc::UnboundedReceiver<Command>,
-        feedback_rx: mpsc::UnboundedReceiver<dataflow::Response>,
+        mut internal_cmd_rx: mpsc::UnboundedReceiver<Message>,
+        mut cmd_rx: mpsc::UnboundedReceiver<Command>,
         _timestamper_thread_handle: JoinOnDropHandle<()>,
     ) {
-        let (drain_trigger, drain_tripwire) = oneshot::channel::<()>();
+        let mut metric_scraper_stream = self.metric_scraper.tick_stream();
 
-        let cmd_stream = UnboundedReceiverStream::new(cmd_rx)
-            .map(Message::Command)
-            .chain(stream::once(future::ready(Message::Shutdown)));
+        loop {
+            let msg = select! {
+                // Order matters here. We want to process internal commands
+                // before processing external commands.
+                biased;
 
-        let feedback_stream = UnboundedReceiverStream::new(feedback_rx).map(Message::Worker);
+                Some(m) = internal_cmd_rx.recv() => m,
+                Some(m) = self.dataflow_client.recv() => Message::Worker(m),
+                Some(m) = metric_scraper_stream.next() => m,
+                m = cmd_rx.recv() => match m {
+                    None => break,
+                    Some(m) => Message::Command(m),
+                }
+            };
 
-        let metric_scraper_stream = self
-            .metric_scraper
-            .tick_stream()
-            .take_until(drain_tripwire)
-            .boxed();
-
-        let mut messages = ore::future::select_all_biased(vec![
-            // Order matters here. We want to drain internal commands
-            // (`internal_cmd_rx` and `feedback_stream`) before processing
-            // external commands (`cmd_stream`).
-            UnboundedReceiverStream::new(internal_cmd_rx).boxed(),
-            feedback_stream.boxed(),
-            metric_scraper_stream,
-            cmd_stream.boxed(),
-        ]);
-
-        while let Some(msg) = messages.next().await {
             match msg {
                 Message::Command(cmd) => self.message_command(cmd),
                 Message::Worker(worker) => self.message_worker(worker),
@@ -659,10 +596,6 @@ impl Coordinator {
                     self.message_advance_source_timestamp(advance)
                 }
                 Message::ScrapeMetrics => self.message_scrape_metrics(),
-                Message::Shutdown => {
-                    self.message_shutdown();
-                    break;
-                }
             }
 
             if self.need_advance {
@@ -670,11 +603,7 @@ impl Coordinator {
             }
         }
 
-        // Cleanly drain any pending messages from the worker before shutting
-        // down.
-        drop(drain_trigger);
-        drop(self.internal_cmd_tx);
-        while messages.next().await.is_some() {}
+        drop(self.ts_tx);
     }
 
     // Advance all local inputs (tables) to the current wall clock or at least
@@ -910,11 +839,6 @@ impl Coordinator {
                 tx.send(Err(e), session);
             }
         }
-    }
-
-    fn message_shutdown(&mut self) {
-        self.ts_tx.send(TimestampMessage::Shutdown).unwrap();
-        self.broadcast(dataflow::Command::Shutdown);
     }
 
     fn message_send_diffs(
@@ -4157,7 +4081,7 @@ impl Coordinator {
     }
 
     fn broadcast(&self, cmd: dataflow::Command) {
-        self.dataflow_client.broadcast(cmd);
+        self.dataflow_client.send(cmd);
     }
 
     // Notify the timestamper thread that a source has been created or dropped.
@@ -4302,8 +4226,7 @@ impl Coordinator {
 /// coordinator.
 pub async fn serve(
     Config {
-        workers,
-        timely_worker,
+        dataflow_client,
         symbiosis_url,
         logging,
         data_directory,
@@ -4318,7 +4241,6 @@ pub async fn serve(
     }: Config<'_>,
 ) -> Result<(Handle, Client), CoordError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
     let (internal_cmd_tx, internal_cmd_rx) = mpsc::unbounded_channel();
 
     let symbiosis = if let Some(symbiosis_url) = symbiosis_url {
@@ -4334,7 +4256,7 @@ pub async fn serve(
         safe_mode,
         enable_logging: logging.is_some(),
         build_info,
-        num_workers: workers,
+        num_workers: dataflow_client.num_workers(),
         timestamp_frequency,
         now: system_time,
         persist,
@@ -4345,19 +4267,6 @@ pub async fn serve(
     let cluster_id = catalog.config().cluster_id;
     let session_id = catalog.config().session_id;
     let start_instant = catalog.config().start_instant;
-
-    let (worker_txs, worker_rxs): (Vec<_>, Vec<_>) =
-        (0..workers).map(|_| crossbeam_channel::unbounded()).unzip();
-    let worker_guards = dataflow::serve(dataflow::Config {
-        command_receivers: worker_rxs,
-        timely_worker,
-        experimental_mode,
-        now: system_time,
-        metrics_registry: metrics_registry.clone(),
-        persist: persister,
-        feedback_tx,
-    })
-    .map_err(|s| CoordError::Unstructured(anyhow!("{}", s)))?;
 
     let metric_scraper = Scraper::new(logging.as_ref(), metrics_registry.clone())?;
 
@@ -4389,7 +4298,6 @@ pub async fn serve(
         .name("coordinator".to_string())
         .spawn(move || {
             let now = catalog.config().now;
-            let dataflow_client = DataflowClient::new(worker_guards, worker_txs);
             let mut coord = Coordinator {
                 dataflow_client,
                 view_optimizer: Optimizer::logical_optimizer(),
@@ -4401,7 +4309,7 @@ pub async fn serve(
                     .map(duration_to_timestamp_millis),
                 logging_enabled: logging.is_some(),
                 internal_cmd_tx,
-                ts_tx: ts_tx.clone(),
+                ts_tx,
                 metric_scraper,
                 closed_up_to: 1,
                 read_lower_bound: 1,
@@ -4429,24 +4337,15 @@ pub async fn serve(
                     log_logging: config.log_logging,
                 }));
             }
+            if let Some(persister) = persister {
+                coord.broadcast(dataflow::Command::EnablePersistence(persister));
+            }
             let bootstrap = handle.block_on(coord.bootstrap(builtin_table_updates));
             let ok = bootstrap.is_ok();
             bootstrap_tx.send(bootstrap).unwrap();
-            if !ok {
-                // Tell the timestamper thread to shut down.
-                ts_tx.send(TimestampMessage::Shutdown).unwrap();
-                // Explicitly drop the timestamper handle here so we can wait for
-                // the thread to return.
-                drop(timestamper_thread_handle);
-                coord.broadcast(dataflow::Command::Shutdown);
-                return;
+            if ok {
+                handle.block_on(coord.serve(internal_cmd_rx, cmd_rx, timestamper_thread_handle))
             }
-            handle.block_on(coord.serve(
-                internal_cmd_rx,
-                cmd_rx,
-                feedback_rx,
-                timestamper_thread_handle,
-            ))
         })
         .unwrap();
     match bootstrap_rx.recv().unwrap() {
@@ -4470,8 +4369,7 @@ pub fn serve_debug(
 ) -> (
     JoinOnDropHandle<()>,
     Client,
-    tokio::sync::mpsc::UnboundedSender<dataflow::Response>,
-    tokio::sync::mpsc::UnboundedReceiver<dataflow::Response>,
+    tokio::sync::mpsc::UnboundedSender<Command>,
     Arc<Mutex<u64>>,
 ) {
     lazy_static! {
@@ -4481,7 +4379,7 @@ pub fn serve_debug(
         *DEBUG_TIMESTAMP.lock().unwrap()
     }
 
-    let (catalog, builtin_table_updates, persister) = catalog::Catalog::open(&catalog::Config {
+    let (catalog, builtin_table_updates, _persister) = catalog::Catalog::open(&catalog::Config {
         path: catalog_path,
         enable_logging: true,
         experimental_mode: None,
@@ -4497,22 +4395,14 @@ pub fn serve_debug(
     })
     .unwrap();
 
-    // We want to be able to control communication from dataflow to the
-    // coordinator, so setup an additional channel pair.
-    let (feedback_tx, inner_feedback_rx) = mpsc::unbounded_channel();
-    let (inner_feedback_tx, feedback_rx) = mpsc::unbounded_channel();
-
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (internal_cmd_tx, internal_cmd_rx) = mpsc::unbounded_channel();
-    let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
-    let worker_guards = dataflow::serve(dataflow::Config {
-        command_receivers: vec![worker_rx],
+    let (_dataflow_server, dataflow_client) = dataflow::serve(dataflow::Config {
+        workers: 1,
         timely_worker: timely::WorkerConfig::default(),
         experimental_mode: true,
         now: get_debug_timestamp,
         metrics_registry: metrics_registry.clone(),
-        persist: persister,
-        feedback_tx,
     })
     .unwrap();
 
@@ -4523,23 +4413,22 @@ pub fn serve_debug(
         .spawn(move || {
             let _executor_guard = executor.enter();
             loop {
-                match ts_rx.recv().unwrap() {
-                    TimestampMessage::Shutdown => break,
-
+                match ts_rx.recv() {
                     // Allow local and file sources only. We don't need to do anything for these.
-                    TimestampMessage::Add(
+                    Ok(TimestampMessage::Add(
                         GlobalId::System(_),
                         SourceConnector::Local {
                             timeline: Timeline::EpochMilliseconds,
                         },
-                    )
-                    | TimestampMessage::Add(
+                    ))
+                    | Ok(TimestampMessage::Add(
                         GlobalId::User(_),
                         SourceConnector::External {
                             connector: ExternalSourceConnector::File(_),
                             ..
                         },
-                    ) => {}
+                    )) => {}
+                    Err(_) => break,
                     // Panic on anything else (like Kafka sources) until we support them.
                     msg => panic!("unexpected {:?}", msg),
                 }
@@ -4551,7 +4440,6 @@ pub fn serve_debug(
     let (bootstrap_tx, bootstrap_rx) = std::sync::mpsc::channel();
     let handle = TokioHandle::current();
     let thread = thread::spawn(move || {
-        let dataflow_client = DataflowClient::new(worker_guards, vec![worker_tx]);
         let mut coord = Coordinator {
             dataflow_client,
             view_optimizer: Optimizer::logical_optimizer(),
@@ -4582,21 +4470,14 @@ pub fn serve_debug(
         };
         let bootstrap = handle.block_on(coord.bootstrap(builtin_table_updates));
         bootstrap_tx.send(bootstrap).unwrap();
-        handle.block_on(coord.serve(
-            internal_cmd_rx,
-            cmd_rx,
-            feedback_rx,
-            timestamper_thread_handle,
-        ))
+        handle.block_on(coord.serve(internal_cmd_rx, cmd_rx, timestamper_thread_handle))
     })
     .join_on_drop();
     bootstrap_rx.recv().unwrap().unwrap();
-    let client = Client::new(cmd_tx);
+    let client = Client::new(cmd_tx.clone());
     (
         thread,
         client,
-        inner_feedback_tx,
-        inner_feedback_rx,
         DEBUG_TIMESTAMP.clone(),
     )
 }
