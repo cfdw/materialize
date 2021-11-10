@@ -28,4 +28,4 @@ garbage
   FORMAT PROTOBUF MESSAGE '.Simple' USING SCHEMA FILE '${testdrive.temp-dir}/simple.pb'
 
 ! SELECT * FROM corrupted
-Decode error: Text: protobuf deserialization error: Deserializing into rust object: protobuf error
+Decode error: Text: protobuf deserialization error: incorrect tag
