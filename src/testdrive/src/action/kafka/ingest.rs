@@ -51,6 +51,7 @@ enum Format {
     Protobuf {
         descriptor_file: String,
         message: String,
+        confluent_wire_format: bool,
     },
     Bytes {
         terminator: Option<u8>,
@@ -65,6 +66,7 @@ enum Transcoder {
     },
     Protobuf {
         message: MessageDescriptor,
+        schema_id: Option<i32>,
     },
     Bytes {
         terminator: Option<u8>,
@@ -88,6 +90,16 @@ impl Transcoder {
     where
         R: BufRead,
     {
+        fn write_confluent_wire_magic(schema_id: i32, out: &mut Vec<u8>) {
+            // The first byte is a magic byte (0) that indicates the Confluent
+            // serialization format version, and the next four bytes are a
+            // 32-bit schema ID.
+            //
+            // https://docs.confluent.io/3.3.0/schema-registry/docs/serializer-formatter.html#wire-format
+            out.write_u8(0).unwrap();
+            out.write_i32::<NetworkEndian>(schema_id).unwrap();
+        }
+
         match self {
             Transcoder::Avro {
                 schema,
@@ -98,13 +110,7 @@ impl Transcoder {
                     let val = avro::from_json(&val, schema.top_node())?;
                     let mut out = vec![];
                     if *confluent_wire_format {
-                        // The first byte is a magic byte (0) that indicates the Confluent
-                        // serialization format version, and the next four bytes are a
-                        // 32-bit schema ID.
-                        //
-                        // https://docs.confluent.io/3.3.0/schema-registry/docs/serializer-formatter.html#wire-format
-                        out.write_u8(0).unwrap();
-                        out.write_i32::<NetworkEndian>(*schema_id).unwrap();
+                        write_confluent_wire_magic(*schema_id, &mut out);
                     }
                     out.extend(avro::to_avro_datum(&schema, val).map_err_to_string()?);
                     Ok(Some(out))
@@ -112,11 +118,14 @@ impl Transcoder {
                     Ok(None)
                 }
             }
-            Transcoder::Protobuf { message } => {
+            Transcoder::Protobuf { message, schema_id } => {
                 if let Some(val) = Self::decode_json::<_, Box<serde_json::value::RawValue>>(row)? {
                     let message = protobuf::json::parse_dynamic_from_str(message, val.get())
                         .map_err(|e| format!("parsing protobuf JSON: {}", e))?;
                     let mut out = vec![];
+                    if let Some(schema_id) = schema_id {
+                        write_confluent_wire_magic(*schema_id, &mut out);
+                    }
                     message
                         .write_to_vec_dyn(&mut out)
                         .map_err(|e| e.to_string())?;
@@ -160,9 +169,12 @@ pub fn build_ingest(mut cmd: BuiltinCommand) -> Result<IngestAction, String> {
             let descriptor_file = cmd.args.string("descriptor-file")?;
             let message = cmd.args.string("message")?;
             validate_protobuf_message_name(&message)?;
+            let confluent_wire_format =
+                cmd.args.opt_bool("confluent-wire-format")?.unwrap_or(false);
             Format::Protobuf {
                 descriptor_file,
                 message,
+                confluent_wire_format,
             }
         }
         "bytes" => Format::Bytes { terminator: None },
@@ -177,9 +189,14 @@ pub fn build_ingest(mut cmd: BuiltinCommand) -> Result<IngestAction, String> {
             let descriptor_file = cmd.args.string("key-descriptor-file")?;
             let message = cmd.args.string("key-message")?;
             validate_protobuf_message_name(&message)?;
+            let confluent_wire_format = cmd
+                .args
+                .opt_bool("key-confluent-wire-format")?
+                .unwrap_or(false);
             Some(Format::Protobuf {
                 descriptor_file,
                 message,
+                confluent_wire_format,
             })
         }
         Some("bytes") => Some(Format::Bytes {
@@ -282,6 +299,7 @@ impl Action for IngestAction {
                 Format::Protobuf {
                     descriptor_file,
                     message,
+                    confluent_wire_format,
                 } => {
                     let bytes = fs::read(temp_path.join(descriptor_file))
                         .await
@@ -293,7 +311,17 @@ impl Action for IngestAction {
                         .iter()
                         .find_map(|fd| fd.message_by_full_name(&message))
                         .ok_or_else(|| format!("unknown message name {}", message))?;
-                    Ok(Transcoder::Protobuf { message })
+                    let schema_id = if confluent_wire_format {
+                        let subject_name = format!("{}-{}", topic_name, typ);
+                        let subject = ccsr_client
+                            .get_subject(&subject_name)
+                            .await
+                            .map_err(|e| format!("fetching current schema: {}", e))?;
+                        Some(subject.schema.id)
+                    } else {
+                        None
+                    };
+                    Ok(Transcoder::Protobuf { message, schema_id })
                 }
                 Format::Bytes { terminator } => Ok(Transcoder::Bytes { terminator }),
             }

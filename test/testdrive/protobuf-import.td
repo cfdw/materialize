@@ -97,14 +97,7 @@ $ schema-registry-publish subject=importee.proto schema-type=protobuf references
 $ schema-registry-publish subject=testdrive-import-csr-${testdrive.seed}-value schema-type=protobuf references=empty.proto,importee.proto
 \${importer-schema}
 
-# TODO(benesch): There is a big bug here! In the Confluent toolchain, these
-# messages are emitted with the CSR magic at the start. We are *not* doing that
-# here, which means that all we are testing is that our incorrectly-formatted
-# Kafka topic is ingestible. We need to teach `kafka-ingest` to accept a
-# `confluent-schema-id` parameter that prefixes these messages with the magic
-# prefix, then teach the ingestor to skip that magic prefix when the CSR is
-# the source of the schema. See #9250.
-$ kafka-ingest topic=import-csr format=protobuf descriptor-file=import.pb message=.Importer
+$ kafka-ingest topic=import-csr format=protobuf descriptor-file=import.pb message=.Importer confluent-wire-format=true
 {"importee1": {"b": false}, "importee2": {"ts": {"seconds": 1234, "nanos": 5678}}}
 
 > CREATE MATERIALIZED SOURCE import_csr FROM

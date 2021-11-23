@@ -1056,12 +1056,14 @@ fn get_encoding_inner<T: sql_parser::ast::AstInfo>(
                     let value = DataEncoding::Protobuf(ProtobufEncoding {
                         descriptors: strconv::parse_bytes(&value.schema)?,
                         message_name: value.message_name.clone(),
+                        confluent_wire_format: true,
                     });
                     if let Some(key) = key {
                         return Ok(SourceDataEncoding::KeyValue {
                             key: DataEncoding::Protobuf(ProtobufEncoding {
                                 descriptors: strconv::parse_bytes(&key.schema)?,
                                 message_name: key.message_name.clone(),
+                                confluent_wire_format: true,
                             }),
                             value,
                         });
@@ -1085,6 +1087,7 @@ fn get_encoding_inner<T: sql_parser::ast::AstInfo>(
                 DataEncoding::Protobuf(ProtobufEncoding {
                     descriptors,
                     message_name: message_name.to_owned(),
+                    confluent_wire_format: false,
                 })
             }
         },

@@ -110,6 +110,9 @@ List new features before bug fixes.
 - Fix a crash when decoding certain messages from Protobuf-formatted Kafka
   topics {{% gh 8930 %}}.
 
+- Correctly decode messages in Protobuf-formatted Kafka sources whose schema
+  comes from a schema registry.
+
 {{% version-header v0.10.0 %}}
 
 - Allow ingesting avro schemas whose top node is not a record type.
