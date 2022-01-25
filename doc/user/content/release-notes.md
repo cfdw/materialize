@@ -120,6 +120,10 @@ changes that have not yet been documented.
 
 - Add the `array_cat` function.
 
+- Support ingesting text-encoded one-dimensional arrays from PostgreSQL sources.
+  However, note that arrays are not generally recommended, and Materialize
+  offers more robust support for our [`list`] type.
+
 {{< comment >}}
 Only add new release notes above this line.
 

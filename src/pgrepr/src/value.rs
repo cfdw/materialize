@@ -457,10 +457,7 @@ impl Value {
                         length: elements.len(),
                     })
                 }
-                Value::Array {
-                    dims,
-                    elements,
-                }
+                Value::Array { dims, elements }
             }
             Type::Bool => Value::Bool(strconv::parse_bool(raw)?),
             Type::Bytea => Value::Bytea(strconv::parse_bytes(raw)?),

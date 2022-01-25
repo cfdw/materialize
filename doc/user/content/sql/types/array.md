@@ -135,7 +135,6 @@ Array element | Catalog name | OID
 You can [cast](/sql/functions/cast) all array types to
 [`text`](/sql/types/text) by assignment.
 
-
 {{< version-added v0.7.4 >}}
 You can cast `text` to any array type. The input must conform to the [textual
 format](#textual-format) described above, with the additional restriction that
