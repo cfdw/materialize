@@ -1,0 +1,17 @@
+[package]
+name = "mz-storage"
+description = "The storage layer of Materialize Platform."
+version = "0.0.0"
+edition = "2021"
+publish = false
+rust-version = "1.58.0"
+
+[dependencies]
+tonic = "0.6.2"
+prost = { git = "https://github.com/MaterializeInc/prost.git" }
+dataflow = { path = "../dataflow" }
+dataflow-types = { path = "../dataflow-types" }
+
+
+[build-dependencies]
+tonic-build = "0.6.2"
