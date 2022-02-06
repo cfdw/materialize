@@ -17,42 +17,45 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use persist_types::Codec;
 use rusqlite::{named_params, params, Connection, Transaction};
+use timely::PartialOrder;
+
+use persist_types::Codec;
+use timely_util::antichain_ext::Max1Antichain;
 
 const APPLICATION_ID: i32 = 0x0872_e898; // chosen randomly
 
 const SCHEMA: &str = "
-CREATE TABLE arrangements (
-    arrangement_id integer PRIMARY KEY,
+CREATE TABLE collections (
+    collection_id integer PRIMARY KEY,
     name text NOT NULL UNIQUE
 );
 
 CREATE TABLE data (
-    arrangement_id integer NOT NULL REFERENCES arrangements (arrangement_id),
+    collection_id integer NOT NULL REFERENCES collections (collection_id),
     key blob NOT NULL,
     value blob NOT NULL,
     time integer NOT NULL,
     diff integer NOT NULL,
-    UNIQUE (arrangement_id, key, value, time)
+    UNIQUE (collection_id, key, value, time)
 );
 
-CREATE INDEX data_time_idx ON data (arrangement_id, time);
+CREATE INDEX data_time_idx ON data (collection_id, time);
 
 CREATE TABLE sinces (
-    arrangement_id NOT NULL UNIQUE REFERENCES arrangements (arrangement_id),
-    since integer NOT NULL
+    collection_id NOT NULL UNIQUE REFERENCES collections (collection_id),
+    since integer
 );
 
 CREATE TABLE uppers (
-    arrangement_id NOT NULL UNIQUE REFERENCES arrangements (arrangement_id),
-    upper integer NOT NULL
+    collection_id NOT NULL UNIQUE REFERENCES collections (collection_id),
+    upper integer
 );
 ";
 
 /// A durable metadata store.
 ///
-/// A stash manages any number of named [`StashArrangement`]s.
+/// A stash manages any number of named [`StashCollection`]s.
 ///
 /// Data is stored in a single file on disk. The format of this file is not
 /// specified and should not be relied upon. The only promise is stability. Any
@@ -95,18 +98,18 @@ impl Stash {
         })
     }
 
-    /// Loads or creates the named arrangement.
+    /// Loads or creates the named collection.
     ///
-    /// If the arrangement with the specified name does not yet exist, it is
+    /// If the collection with the specified name does not yet exist, it is
     /// created with no entries, a zero since frontier, and a zero upper
     /// frontier. Otherwise the existing durable state is loaded.
     ///
     /// It is the callers responsibility to keep `K` and `V` fixed for a given
-    /// arrangement in a given stash for the lifetime of the stash.
+    /// collection in a given stash for the lifetime of the stash.
     ///
-    /// It is valid to construct multiple handles to the same named arrangement
+    /// It is valid to construct multiple handles to the same named collection
     /// and use them simultaneously.
-    pub fn arrangement<K, V>(&self, name: &str) -> Result<StashArrangement<K, V>, StashError>
+    pub fn collection<K, V>(&self, name: &str) -> Result<StashCollection<K, V>, StashError>
     where
         K: Codec + Ord,
         V: Codec + Ord,
@@ -114,64 +117,62 @@ impl Stash {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO arrangements (name) VALUES ($name) ON CONFLICT DO NOTHING",
+            "INSERT INTO collections (name) VALUES ($name) ON CONFLICT DO NOTHING",
             named_params! {"$name": name},
         )?;
-        let arrangement_id = tx.query_row(
-            "SELECT arrangement_id FROM arrangements WHERE name = $name",
+        let collection_id = tx.query_row(
+            "SELECT collection_id FROM collections WHERE name = $name",
             named_params! {"$name": name},
-            |row| row.get("arrangement_id"),
+            |row| row.get("collection_id"),
         )?;
         tx.execute(
-            "INSERT INTO sinces (arrangement_id, since) VALUES ($arrangement_id, $since)
+            "INSERT INTO sinces (collection_id, since) VALUES ($collection_id, $since)
              ON CONFLICT DO NOTHING",
-            named_params! {"$arrangement_id": arrangement_id, "$since": 0_i64},
+            named_params! {"$collection_id": collection_id, "$since": 0_i64},
         )?;
         tx.execute(
-            "INSERT INTO uppers (arrangement_id, upper) VALUES ($arrangement_id, $upper)
+            "INSERT INTO uppers (collection_id, upper) VALUES ($collection_id, $upper)
              ON CONFLICT DO NOTHING",
-            named_params! {"$arrangement_id": arrangement_id, "$upper": 0_i64},
+            named_params! {"$collection_id": collection_id, "$upper": 0_i64},
         )?;
         tx.commit()?;
-        Ok(StashArrangement {
-            conn: self.conn.clone(),
-            arrangement_id,
+        Ok(StashCollection {
+            conn: Arc::clone(&self.conn),
+            collection_id,
             _kv: PhantomData,
         })
     }
 }
 
-/// `StashArrangement` is analogous to a [differential dataflow arrangement],
-/// but the state of the collection is durable.
+/// `StashCollection` is like a differential dataflow [`Collection`], but the
+/// state of the collection is durable.
 ///
-/// A `StashArrangement` stores `(key, value, timestamp, diff)` entries. The key
+/// A `StashCollection` stores `(key, value, timestamp, diff)` entries. The key
 /// and value types are chosen by the caller; they must implement [`Ord`] and
 /// they must be serializable to and deserializable from bytes via the [`Codec`]
 /// trait. The timestamp and diff types are fixed to `i64`.
 ///
-/// A `StashArrangement` maintains a since frontier and an upper frontier, as
+/// A `StashCollection` maintains a since frontier and an upper frontier, as
 /// described in the [correctness vocabulary document]. To advance the since
 /// frontier, call [`compact`]. To advance the upper frontier, call [`seal`]. To
 /// physically compact data beneath the since frontier, call [`consolidate`].
 ///
-/// [`compact`]: StashArrangement::compact
-/// [`consolidate`]: StashArrangement::consolidate
-/// [`seal`]: StashArrangement::seal
-/// [correctness vocabulary document]:
-///     https://github.com/MaterializeInc/materialize/blob/main/doc/developer/design/20210831_correctness.md
-/// [differential dataflow arrangement]:
-///     differential_dataflow::operators::arrange::arrangement
-pub struct StashArrangement<K, V>
+/// [`compact`]: StashCollection::compact
+/// [`consolidate`]: StashCollection::consolidate
+/// [`seal`]: StashCollection::seal
+/// [correctness vocabulary document]: https://github.com/MaterializeInc/materialize/blob/main/doc/developer/design/20210831_correctness.md
+/// [`Collection`]: differential_dataflow::collection::Collection
+pub struct StashCollection<K, V>
 where
     K: Codec + Ord,
     V: Codec + Ord,
 {
     conn: Arc<Mutex<Connection>>,
-    arrangement_id: i64,
+    collection_id: i64,
     _kv: PhantomData<(K, V)>,
 }
 
-impl<K, V> StashArrangement<K, V>
+impl<K, V> StashCollection<K, V>
 where
     K: Codec + Ord,
     V: Codec + Ord,
@@ -185,20 +186,27 @@ where
     /// frontier. The time may also be greater than the upper frontier,
     /// indicating data that has not yet been made definite.
     ///
-    /// [`consolidate`]: StashArrangement::consolidate
-    /// [`update`]: StashArrangement::update
-    /// [`update_many`]: StashArrangement::update_many
+    /// [`consolidate`]: StashCollection::consolidate
+    /// [`update`]: StashCollection::update
+    /// [`update_many`]: StashCollection::update_many
     pub fn iter(&self) -> Result<impl Iterator<Item = ((K, V), i64, i64)>, StashError> {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
-        let since = self.since_tx(&tx)?;
+        let since = match self.since_tx(&tx)? {
+            Max1Antichain::Singular(since) => since,
+            Max1Antichain::Empty => {
+                return Err(StashError::from(
+                    "cannot iterate collection with empty since frontier",
+                ));
+            }
+        };
         let mut rows = tx
             .prepare(
                 "SELECT key, value, time, diff FROM data
-                 WHERE arrangement_id = $arrangement_id",
+                 WHERE collection_id = $collection_id",
             )?
             .query_and_then(
-                named_params! {"$arrangement_id": self.arrangement_id},
+                named_params! {"$collection_id": self.collection_id},
                 |row| {
                     let key_buf: Vec<_> = row.get("key")?;
                     let value_buf: Vec<_> = row.get("value")?;
@@ -223,23 +231,30 @@ where
     /// frontier. The time may also be greater than the upper frontier,
     /// indicating data that has not yet been made definite.
     ///
-    /// [`consolidate`]: StashArrangement::consolidate
-    /// [`update`]: StashArrangement::update
-    /// [`update_many`]: StashArrangement::update_many
+    /// [`consolidate`]: StashCollection::consolidate
+    /// [`update`]: StashCollection::update
+    /// [`update_many`]: StashCollection::update_many
     pub fn iter_key(&self, key: K) -> Result<impl Iterator<Item = (V, i64, i64)>, StashError> {
         let mut key_buf = vec![];
         key.encode(&mut key_buf);
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
-        let since = self.since_tx(&tx)?;
+        let since = match self.since_tx(&tx)? {
+            Max1Antichain::Singular(since) => since,
+            Max1Antichain::Empty => {
+                return Err(StashError::from(
+                    "cannot iterate collection with empty since frontier",
+                ));
+            }
+        };
         let mut rows = tx
             .prepare(
                 "SELECT value, time, diff FROM data
-                 WHERE arrangement_id = $arrangement_id AND key = $key",
+                 WHERE collection_id = $collection_id AND key = $key",
             )?
             .query_and_then(
                 named_params! {
-                    "$arrangement_id": self.arrangement_id,
+                    "$collection_id": self.collection_id,
                     "$key": key_buf,
                 },
                 |row| {
@@ -277,31 +292,36 @@ where
         let tx = conn.transaction()?;
         let upper = self.upper_tx(&tx)?;
         let mut insert_stmt = tx.prepare(
-            "INSERT INTO data (arrangement_id, key, value, time, diff)
-             VALUES ($arrangement_id, $key, $value, $time, $diff)
-             ON CONFLICT (arrangement_id, key, value, time) DO UPDATE SET diff = diff + excluded.diff",
+            "INSERT INTO data (collection_id, key, value, time, diff)
+             VALUES ($collection_id, $key, $value, $time, $diff)
+             ON CONFLICT (collection_id, key, value, time) DO UPDATE SET diff = diff + excluded.diff",
         )?;
         let mut delete_stmt = tx.prepare(
             "DELETE FROM data
-             WHERE arrangement_id = $arrangement_id AND key = $key AND value = $value AND time = $time AND diff = 0",
+             WHERE collection_id = $collection_id AND key = $key AND value = $value AND time = $time AND diff = 0",
         )?;
         let mut key_buf = vec![];
         let mut value_buf = vec![];
         for ((key, value), time, diff) in entries {
-            assert!(upper <= time);
+            if !upper.less_equal(&time) {
+                return Err(StashError::from(format!(
+                    "entry time {:?} is less than the current upper frontier {:?}",
+                    time, upper
+                )));
+            }
             key_buf.clear();
             value_buf.clear();
             key.encode(&mut key_buf);
             value.encode(&mut value_buf);
             insert_stmt.execute(named_params! {
-                "$arrangement_id": self.arrangement_id,
+                "$collection_id": self.collection_id,
                 "$key": key_buf,
                 "$value": value_buf,
                 "$time": time,
                 "$diff": diff,
             })?;
             delete_stmt.execute(named_params! {
-                "$arrangement_id": self.arrangement_id,
+                "$collection_id": self.collection_id,
                 "$key": key_buf,
                 "$value": value_buf,
                 "$time": time,
@@ -320,13 +340,23 @@ where
     ///
     /// Intuitively, this method declares that all times less than `upper` are
     /// definite.
-    pub fn seal(&self, upper: i64) -> Result<(), StashError> {
+    pub fn seal<A>(&self, new_upper: A) -> Result<(), StashError>
+    where
+        A: Into<Max1Antichain<i64>>,
+    {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
-        assert!(self.upper_tx(&tx)? <= upper);
+        let upper = self.upper_tx(&tx)?;
+        let new_upper = new_upper.into();
+        if PartialOrder::less_than(&new_upper, &upper) {
+            return Err(StashError::from(format!(
+                "seal request {:?} is less than the current upper frontier {:?}",
+                new_upper, upper
+            )));
+        }
         tx.execute(
-            "UPDATE uppers SET upper = $upper WHERE arrangement_id = $arrangement_id",
-            named_params! {"$upper": upper, "$arrangement_id": self.arrangement_id},
+            "UPDATE uppers SET upper = $upper WHERE collection_id = $collection_id",
+            named_params! {"$upper": new_upper.as_option(), "$collection_id": self.collection_id},
         )?;
         tx.commit()?;
         Ok(())
@@ -339,14 +369,30 @@ where
     ///
     /// Intuitively, this method performs logical compaction. Existing entries
     /// whose time is less than `since` are fast-forwarded to `since`.
-    pub fn compact(&self, since: i64) -> Result<(), StashError> {
+    pub fn compact<A>(&self, new_since: A) -> Result<(), StashError>
+    where
+        A: Into<Max1Antichain<i64>>,
+    {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
-        assert!(since <= self.upper_tx(&tx)?);
-        assert!(self.since_tx(&tx)? <= since);
+        let since = self.since_tx(&tx)?;
+        let upper = self.upper_tx(&tx)?;
+        let new_since = new_since.into();
+        if PartialOrder::less_than(&upper, &new_since) {
+            return Err(StashError::from(format!(
+                "compact request {:?} is greater than the current upper frontier {:?}",
+                new_since, upper
+            )));
+        }
+        if PartialOrder::less_than(&new_since, &since) {
+            return Err(StashError::from(format!(
+                "compact request {:?} is less than the current since frontier {:?}",
+                new_since, upper
+            )));
+        }
         tx.execute(
-            "UPDATE sinces SET since = $since WHERE arrangement_id = $arrangement_id",
-            named_params! {"$since": since, "$arrangement_id": self.arrangement_id},
+            "UPDATE sinces SET since = $since WHERE collection_id = $collection_id",
+            named_params! {"$since": new_since.as_option(), "$collection_id": self.collection_id},
         )?;
         tx.commit()?;
         Ok(())
@@ -361,30 +407,42 @@ where
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
         let since = self.since_tx(&tx)?;
-        tx.execute(
-            "INSERT INTO data (arrangement_id, key, value, time, diff)
-             SELECT arrangement_id, key, value, $since, sum(diff) FROM data
-             WHERE arrangement_id = $arrangement_id AND time < $since
-             GROUP BY key, value
-             ON CONFLICT (arrangement_id, key, value, time) DO UPDATE SET diff = diff + excluded.diff",
-            named_params! {
-                "$arrangement_id": self.arrangement_id,
-                "$since": since,
-            },
-        )?;
-        tx.execute(
-            "DELETE FROM data WHERE arrangement_id = $arrangement_id AND time < $since",
-            named_params! {
-                "$arrangement_id": self.arrangement_id,
-                "$since": since,
-            },
-        )?;
+        match since {
+            Max1Antichain::Singular(since) => {
+                tx.execute(
+                    "INSERT INTO data (collection_id, key, value, time, diff)
+                     SELECT collection_id, key, value, $since, sum(diff) FROM data
+                     WHERE collection_id = $collection_id AND time < $since
+                     GROUP BY key, value
+                     ON CONFLICT (collection_id, key, value, time) DO UPDATE SET diff = diff + excluded.diff",
+                    named_params! {
+                        "$collection_id": self.collection_id,
+                        "$since": since,
+                    },
+                )?;
+                tx.execute(
+                    "DELETE FROM data WHERE collection_id = $collection_id AND time < $since",
+                    named_params! {
+                        "$collection_id": self.collection_id,
+                        "$since": since,
+                    },
+                )?;
+            }
+            Max1Antichain::Empty => {
+                tx.execute(
+                    "DELETE FROM data WHERE collection_id = $collection_id",
+                    named_params! {
+                        "$collection_id": self.collection_id,
+                    },
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
 
     /// Reports the current since frontier.
-    pub fn since(&self) -> Result<i64, StashError> {
+    pub fn since(&self) -> Result<Max1Antichain<i64>, StashError> {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
         let since = self.since_tx(&tx)?;
@@ -393,7 +451,7 @@ where
     }
 
     /// Reports the current upper frontier.
-    pub fn upper(&self) -> Result<i64, StashError> {
+    pub fn upper(&self) -> Result<Max1Antichain<i64>, StashError> {
         let mut conn = self.conn.lock().expect("lock poisoned");
         let tx = conn.transaction()?;
         let upper = self.upper_tx(&tx)?;
@@ -401,22 +459,22 @@ where
         Ok(upper)
     }
 
-    fn since_tx(&self, tx: &Transaction) -> Result<i64, StashError> {
-        let upper = tx.query_row(
-            "SELECT since FROM sinces WHERE arrangement_id = $arrangement_id",
-            named_params! {"$arrangement_id": self.arrangement_id},
+    fn since_tx(&self, tx: &Transaction) -> Result<Max1Antichain<i64>, StashError> {
+        let since: Option<i64> = tx.query_row(
+            "SELECT since FROM sinces WHERE collection_id = $collection_id",
+            named_params! {"$collection_id": self.collection_id},
             |row| row.get("since"),
         )?;
-        Ok(upper)
+        Ok(since.into())
     }
 
-    fn upper_tx(&self, tx: &Transaction) -> Result<i64, StashError> {
-        let upper = tx.query_row(
-            "SELECT upper FROM uppers WHERE arrangement_id = $arrangement_id",
-            named_params! {"$arrangement_id": self.arrangement_id},
+    fn upper_tx(&self, tx: &Transaction) -> Result<Max1Antichain<i64>, StashError> {
+        let upper: Option<i64> = tx.query_row(
+            "SELECT upper FROM uppers WHERE collection_id = $collection_id",
+            named_params! {"$collection_id": self.collection_id},
             |row| row.get("upper"),
         )?;
-        Ok(upper)
+        Ok(upper.into())
     }
 }
 
@@ -460,6 +518,14 @@ impl From<String> for StashError {
     fn from(e: String) -> StashError {
         StashError {
             inner: InternalStashError::Other(e),
+        }
+    }
+}
+
+impl From<&str> for StashError {
+    fn from(e: &str) -> StashError {
+        StashError {
+            inner: InternalStashError::Other(e.into()),
         }
     }
 }
