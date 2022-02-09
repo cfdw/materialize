@@ -35,10 +35,7 @@ At
 Avro
 Begin
 Between
-Bigint
-Boolean
 Both
-Bpchar
 Broker
 Bucket
 By
@@ -76,8 +73,6 @@ Day
 Days
 Deallocate
 Debezium
-Dec
-Decimal
 Declare
 Decorrelated
 Default
@@ -106,7 +101,6 @@ Fields
 File
 Filter
 First
-Float
 Following
 For
 Foreign
@@ -133,8 +127,6 @@ Index
 Indexes
 Inner
 Insert
-Int
-Integer
 Intersect
 Interval
 Into
@@ -208,7 +200,6 @@ Query
 Range
 Raw
 Read
-Real
 References
 Regex
 Registry
@@ -239,7 +230,6 @@ Show
 Sink
 Sinks
 Slot
-Smallint
 Snapshot
 Some
 Source
@@ -248,7 +238,6 @@ Sqs
 Start
 Stdin
 Stdout
-String
 Subscribe
 Substring
 Superuser
@@ -284,7 +273,6 @@ Users
 Using
 Value
 Values
-Varchar
 Varying
 View
 Views

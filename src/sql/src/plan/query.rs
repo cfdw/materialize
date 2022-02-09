@@ -26,6 +26,7 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::iter;
 use std::mem;
+use std::str::FromStr;
 
 use uuid::Uuid;
 
@@ -35,7 +36,7 @@ use ore::collections::CollectionExt;
 use ore::stack::{CheckedRecursion, RecursionGuard};
 use ore::str::StrExt;
 use sql_parser::ast::display::{AstDisplay, AstFormatter};
-use sql_parser::ast::fold::Fold;
+use sql_parser::ast::fold::{self, Fold};
 use sql_parser::ast::visit_mut::{self, VisitMut};
 use sql_parser::ast::{
     Assignment, AstInfo, Cte, DataType, DeleteStatement, Distinct, Expr, Function, FunctionArgs,
@@ -46,13 +47,13 @@ use sql_parser::ast::{
 };
 
 use ::expr::{GlobalId, Id, RowSetFinishing};
-use repr::adt::numeric;
+use repr::adt;
 use repr::{
     strconv, ColumnName, ColumnType, Datum, RelationDesc, RelationType, Row, RowArena, ScalarType,
     Timestamp,
 };
 
-use crate::catalog::{CatalogItemType, SessionCatalog};
+use crate::catalog::{CatalogItemType, CatalogType, SessionCatalog};
 use crate::func::{self, Func, FuncSpec};
 use crate::names::PartialName;
 use crate::normalize;
@@ -201,6 +202,32 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
         panic!("this should have been handled when walking the CTE");
     }
 
+    fn fold_data_type(&mut self, data_type: DataType<Raw>) -> DataType<Aug> {
+        if let DataType::Normal {
+            name: RawName::Name(name),
+            modifiers,
+        } = &data_type
+        {
+            let mut name = normalize::unresolved_object_name(name.clone()).unwrap();
+            if name.database.is_none() && name.schema.is_none() {
+                match name.item.as_str() {
+                    "smallint" => name.item = "int2".into(),
+                    "int" | "integer" => name.item = "int4".into(),
+                    "bigint" => name.item = "int8".into(),
+                    "dec" | "decimal" => name.item = "numeric".into(),
+                    "float" => match resolve_float_type_modifiers(modifiers) {
+                        Ok(ty) => name.item = ty.into(),
+                        Err(e) if self.status.is_ok() => self.status = Err(e.into()),
+                        Err(_) => (),
+                    },
+                    "real" => name.item = "float4".into(),
+                    _ => (),
+                }
+            }
+        }
+        fold::fold_data_type(self, data_type)
+    }
+
     fn fold_object_name(
         &mut self,
         object_name: <Raw as AstInfo>::ObjectName,
@@ -263,6 +290,27 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
                     print_id: true,
                 }
             }
+        }
+    }
+}
+
+fn resolve_float_type_modifiers(modifiers: &[Value]) -> Result<&'static str, PlanError> {
+    match modifiers {
+        [] => Ok("float8"),
+        [Value::Number(n)] => {
+            let n = strconv::parse_int64(n)?;
+            if n < 1 {
+                sql_bail!("precision for type float most be at least 1 bit");
+            } else if n <= 24 {
+                Ok("float4")
+            } else if n <= 53 {
+                Ok("float8")
+            } else {
+                sql_bail!("precision for type float most be less than 54 bits");
+            }
+        }
+        _ => {
+            sql_bail!("invalid type modifiers for type float")
         }
     }
 }
@@ -4235,42 +4283,112 @@ pub fn scalar_type_from_sql(
                 custom_oid: None,
             }
         }
-        DataType::Other { name, typ_mod } => {
-            let item = match scx.catalog.resolve_item(&name.raw_name()) {
-                Ok(i) => i,
-                Err(_) => sql_bail!(
-                    "type {} does not exist",
-                    name.raw_name().to_string().quoted()
-                ),
+        DataType::Normal { name, modifiers } => {
+            let id = match name.id {
+                Id::Local(_) | Id::LocalBareSource => {
+                    sql_bail!("internal error: type name resolved to local ID")
+                }
+                Id::Global(id) => id,
             };
-            match scx.catalog.try_get_lossy_scalar_type_by_id(&item.id()) {
-                Some(t) => match t {
-                    ScalarType::Numeric { .. } => {
-                        let scale = numeric::extract_typ_mod(typ_mod)?;
-                        ScalarType::Numeric { scale }
+            match scalar_type_from_id(scx.catalog, id)? {
+                ScalarType::Numeric { .. } => apply_numeric_type_modifiers(modifiers)?,
+                ScalarType::Char { .. } => apply_char_type_modifiers(modifiers)?,
+                ScalarType::VarChar { .. } => apply_varchar_type_modifiers(modifiers)?,
+                ty => {
+                    if !modifiers.is_empty() {
+                        sql_bail!("{} does not support type modifiers", &name.to_string());
                     }
-                    ScalarType::Char { .. } => {
-                        let length = repr::adt::char::extract_typ_mod(&typ_mod)?;
-                        ScalarType::Char { length }
-                    }
-                    ScalarType::VarChar { .. } => {
-                        let length = repr::adt::varchar::extract_typ_mod(&typ_mod)?;
-                        ScalarType::VarChar { length }
-                    }
-                    t => {
-                        if !typ_mod.is_empty() {
-                            sql_bail!("{} does not support type modifiers", &name.to_string());
-                        }
-                        t
-                    }
-                },
-                None => sql_bail!(
-                    "type {} does not exist",
-                    name.raw_name().to_string().quoted()
-                ),
+                    ty
+                }
             }
         }
     })
+}
+
+fn apply_numeric_type_modifiers(modifiers: &[Value]) -> Result<ScalarType, PlanError> {
+    let (precision, scale) = match modifiers {
+        [] => (None, None),
+        [precision] => (Some(precision), None),
+        [precision, scale] => (Some(precision), Some(scale)),
+        _ => sql_bail!("more than two modifiers specified for type numeric"),
+    };
+    let max =
+        u8::try_from(adt::numeric::NUMERIC_DATUM_MAX_PRECISION).expect("max precision fits in u8");
+    if let Some(precision) = precision {
+        parse_type_modifier("numeric", "precision", precision, 1, max)?;
+    }
+    let scale = match scale {
+        None => None,
+        Some(scale) => Some(parse_type_modifier("numeric", "scale", scale, 1, max)?),
+    };
+    Ok(ScalarType::Numeric { scale })
+}
+
+fn apply_char_type_modifiers(modifiers: &[Value]) -> Result<ScalarType, PlanError> {
+    let max = usize::try_from(adt::char::MAX_LENGTH).expect("max length fits in usize");
+    let length = match modifiers {
+        [] => None,
+        [modifier] => Some(parse_type_modifier("char", "length", modifier, 1, max)?),
+        _ => sql_bail!("more than one modifier specified for type char"),
+    };
+    Ok(ScalarType::Char { length })
+}
+
+fn apply_varchar_type_modifiers(modifiers: &[Value]) -> Result<ScalarType, PlanError> {
+    let max = usize::try_from(adt::varchar::MAX_LENGTH).expect("max length fits in usize");
+    let length = match modifiers {
+        [] => None,
+        [modifier] => Some(parse_type_modifier("varchar", "length", modifier, 1, max)?),
+        _ => sql_bail!("more than one modifier specified for type varchar"),
+    };
+    Ok(ScalarType::Char { length })
+}
+
+fn parse_type_modifier<T>(ty: &str, field: &str, v: &Value, min: T, max: T) -> Result<T, PlanError>
+where
+    T: FromStr + Ord + fmt::Display,
+    T::Err: fmt::Display,
+{
+    match v {
+        Value::Number(n) => {
+            let n = match T::from_str(n) {
+                Ok(n) => n,
+                Err(e) => sql_bail!("invalid {ty} type modifier: {e}"),
+            };
+            if n < min && n > max {
+                sql_bail!("{field} for type {ty} must be within [{min}-{max}], have {n}");
+            }
+            Ok(n)
+        }
+        _ => sql_bail!("invalid {} type modifier", ty),
+    }
+}
+
+fn scalar_type_from_id(
+    catalog: &dyn SessionCatalog,
+    id: GlobalId,
+) -> Result<ScalarType, PlanError> {
+    let entry = catalog.get_item_by_id(&id);
+    let type_details = match entry.type_details() {
+        Some(type_details) => type_details,
+        None => sql_bail!("internal error: {} is not a type", id),
+    };
+    match type_details {
+        CatalogType::Pg(pg_type) => Ok(pg_type.to_scalar_type_lossy()),
+        CatalogType::List { element_id } => Ok(ScalarType::List {
+            element_type: Box::new(scalar_type_from_id(catalog, *element_id)?),
+            custom_oid: Some(entry.oid()),
+        }),
+        CatalogType::Map { key_id, value_id } => {
+            let key_type = Box::new(scalar_type_from_id(catalog, *key_id)?);
+            assert!(matches!(*key_type, ScalarType::String));
+            let value_type = Box::new(scalar_type_from_id(catalog, *value_id)?);
+            Ok(ScalarType::Map {
+                value_type,
+                custom_oid: Some(entry.oid()),
+            })
+        }
+    }
 }
 
 pub fn scalar_type_from_pg(ty: &pgrepr::Type) -> Result<ScalarType, PlanError> {

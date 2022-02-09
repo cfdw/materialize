@@ -2983,116 +2983,52 @@ impl<'a> Parser<'a> {
 
     /// Parse a SQL datatype (in the context of a CREATE TABLE statement for example)
     fn parse_data_type(&mut self) -> Result<DataType<Raw>, ParserError> {
-        let other = |name: &str| DataType::Other {
-            name: RawName::Name(UnresolvedObjectName::unqualified(name)),
-            typ_mod: vec![],
-        };
-
         let mut data_type = match self.next_token() {
-            Some(Token::Keyword(kw)) => match kw {
-                // Text-like types
-                CHAR | CHARACTER => {
-                    let name = if self.parse_keyword(VARYING) {
-                        "varchar"
-                    } else {
-                        "bpchar"
-                    };
-                    DataType::Other {
-                        name: RawName::Name(UnresolvedObjectName::unqualified(name)),
-                        typ_mod: match self.parse_optional_precision()? {
-                            Some(u) => vec![u],
-                            None => vec![],
-                        },
-                    }
-                }
-                BPCHAR => DataType::Other {
-                    name: RawName::Name(UnresolvedObjectName::unqualified("bpchar")),
-                    typ_mod: match self.parse_optional_precision()? {
-                        Some(u) => vec![u],
-                        None => vec![],
-                    },
-                },
-                VARCHAR => DataType::Other {
-                    name: RawName::Name(UnresolvedObjectName::unqualified("varchar")),
-                    typ_mod: match self.parse_optional_precision()? {
-                        Some(u) => vec![u],
-                        None => vec![],
-                    },
-                },
-                STRING => other("text"),
-
-                // Number-like types
-                BIGINT => other("int8"),
-                SMALLINT => other("int2"),
-                DEC | DECIMAL => DataType::Other {
-                    name: RawName::Name(UnresolvedObjectName::unqualified("numeric")),
-                    typ_mod: self.parse_typ_mod()?,
-                },
-                DOUBLE => {
-                    let _ = self.parse_keyword(PRECISION);
-                    other("float8")
-                }
-                FLOAT => match self.parse_optional_precision()?.unwrap_or(53) {
-                    v if v == 0 || v > 53 => {
-                        return Err(self.error(
-                            self.peek_prev_pos(),
-                            "precision for type float must be within ([1-53])".into(),
-                        ))
-                    }
-                    v if v < 25 => other("float4"),
-                    _ => other("float8"),
-                },
-                INT | INTEGER => other("int4"),
-                REAL => other("float4"),
-
-                // Time-like types
-                TIME => {
-                    if self.parse_keyword(WITH) {
-                        self.expect_keywords(&[TIME, ZONE])?;
-                        other("timetz")
-                    } else {
-                        if self.parse_keyword(WITHOUT) {
-                            self.expect_keywords(&[TIME, ZONE])?;
-                        }
-                        other("time")
-                    }
-                }
-                TIMESTAMP => {
-                    if self.parse_keyword(WITH) {
-                        self.expect_keywords(&[TIME, ZONE])?;
-                        other("timestamptz")
-                    } else {
-                        if self.parse_keyword(WITHOUT) {
-                            self.expect_keywords(&[TIME, ZONE])?;
-                        }
-                        other("timestamp")
-                    }
-                }
-
-                // MZ "proprietary" types
-                MAP => {
-                    return self.parse_map();
-                }
-
-                // Misc.
-                BOOLEAN => other("bool"),
-                BYTES => other("bytea"),
-                JSON => other("jsonb"),
-                _ => {
-                    self.prev_token();
-                    DataType::Other {
-                        name: RawName::Name(self.parse_object_name()?),
-                        typ_mod: self.parse_typ_mod()?,
-                    }
-                }
-            },
-            Some(Token::Ident(_)) => {
-                self.prev_token();
-                DataType::Other {
-                    name: RawName::Name(self.parse_object_name()?),
-                    typ_mod: self.parse_typ_mod()?,
+            // Type names with special SQL syntax.
+            Some(Token::Keyword(CHAR | CHARACTER)) => {
+                if self.parse_keyword(VARYING) {
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("varchar"))?
+                } else {
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("bpchar"))?
                 }
             }
+            Some(Token::Keyword(DOUBLE)) => {
+                let _ = self.parse_keyword(PRECISION);
+                self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("float8"))?
+            }
+            Some(Token::Keyword(TIME)) => {
+                if self.parse_keyword(WITH) {
+                    self.expect_keywords(&[TIME, ZONE])?;
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("timetz"))?
+                } else {
+                    if self.parse_keyword(WITHOUT) {
+                        self.expect_keywords(&[TIME, ZONE])?;
+                    }
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("time"))?
+                }
+            }
+            Some(Token::Keyword(TIMESTAMP)) => {
+                if self.parse_keyword(WITH) {
+                    self.expect_keywords(&[TIME, ZONE])?;
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("timestamptz"))?
+                } else {
+                    if self.parse_keyword(WITHOUT) {
+                        self.expect_keywords(&[TIME, ZONE])?;
+                    }
+                    self.parse_data_type_normal(UnresolvedObjectName::pg_catalog("timestamp"))?
+                }
+            }
+            Some(Token::Keyword(MAP)) => {
+                return self.parse_data_type_map();
+            }
+
+            // All other types.
+            Some(Token::Ident(_) | Token::Keyword(_)) => {
+                self.prev_token();
+                let name = self.parse_object_name()?;
+                self.parse_data_type_normal(name)?
+            }
+
             other => self.expected(self.peek_prev_pos(), "a data type name", other)?,
         };
 
@@ -3118,14 +3054,21 @@ impl<'a> Parser<'a> {
         Ok(data_type)
     }
 
-    fn parse_typ_mod(&mut self) -> Result<Vec<u64>, ParserError> {
-        if self.consume_token(&Token::LParen) {
-            let typ_mod = self.parse_comma_separated(Parser::parse_literal_uint)?;
+    fn parse_data_type_normal(
+        &mut self,
+        name: UnresolvedObjectName,
+    ) -> Result<DataType<Raw>, ParserError> {
+        let modifiers = if self.consume_token(&Token::LParen) {
+            let modifiers = self.parse_comma_separated(Parser::parse_value)?;
             self.expect_token(&Token::RParen)?;
-            Ok(typ_mod)
+            modifiers
         } else {
-            Ok(vec![])
-        }
+            vec![]
+        };
+        Ok(DataType::Normal {
+            name: RawName::Name(name),
+            modifiers,
+        })
     }
 
     /// Parse `AS identifier` (or simply `identifier` if it's not a reserved keyword)
@@ -3283,7 +3226,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_map(&mut self) -> Result<DataType<Raw>, ParserError> {
+    fn parse_data_type_map(&mut self) -> Result<DataType<Raw>, ParserError> {
         self.expect_token(&Token::LBracket)?;
         let key_type = Box::new(self.parse_data_type()?);
         self.expect_token(&Token::Op("=>".to_owned()))?;

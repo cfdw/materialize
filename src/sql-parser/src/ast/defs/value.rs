@@ -234,11 +234,11 @@ pub enum DataType<T: AstInfo> {
         key_type: Box<DataType<T>>,
         value_type: Box<DataType<T>>,
     },
-    /// Types who don't embed other types, e.g. INT
-    Other {
+    /// Types which don't embed other types, e.g. INT.
+    Normal {
         name: T::ObjectName,
-        /// Typ modifiers appended to the type name, e.g. `numeric(38,0)`.
-        typ_mod: Vec<u64>,
+        /// Modifiers appended to the type name, e.g. `numeric(38,0)`.
+        modifiers: Vec<Value>,
     },
 }
 
@@ -263,11 +263,11 @@ impl<T: AstInfo> AstDisplay for DataType<T> {
                 f.write_node(&value_type);
                 f.write_str("]");
             }
-            DataType::Other { name, typ_mod } => {
+            DataType::Normal { name, modifiers } => {
                 f.write_node(name);
-                if typ_mod.len() > 0 {
+                if modifiers.len() > 0 {
                     f.write_str("(");
-                    f.write_node(&display::comma_separated(typ_mod));
+                    f.write_node(&display::comma_separated(modifiers));
                     f.write_str(")");
                 }
             }

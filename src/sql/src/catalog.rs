@@ -125,13 +125,6 @@ pub trait SessionCatalog: fmt::Debug + ExprHumanizer {
     /// Reports whether the specified type exists in the catalog.
     fn item_exists(&self, name: &FullName) -> bool;
 
-    /// Returns a lossy `ScalarType` associated with `id` if one exists.
-    ///
-    /// For example `pg_catalog.numeric` returns `ScalarType::Numeric { scale: None}`,
-    /// meaning that its precision and scale need to be associated with values
-    /// from elsewhere.
-    fn try_get_lossy_scalar_type_by_id(&self, id: &GlobalId) -> Option<ScalarType>;
-
     /// Finds a name like `name` that is not already in use.
     ///
     /// If `name` itself is available, it is returned unchanged.
@@ -271,6 +264,10 @@ pub trait CatalogItem {
     /// Returns the column defaults associated with the catalog item, if the
     /// catalog item is a table.
     fn table_details(&self) -> Option<&[Expr<Raw>]>;
+
+    /// Returns the type details associated with the catalog item, if the
+    /// catalog item is a type.
+    fn type_details(&self) -> Option<&CatalogType>;
 }
 
 /// The type of a [`CatalogItem`].
@@ -304,6 +301,25 @@ impl fmt::Display for CatalogItemType {
             CatalogItemType::Func => f.write_str("func"),
         }
     }
+}
+
+/// The description of a type stored in a [`Catalog`].
+#[derive(Clone, Debug)]
+pub enum CatalogType {
+    /// A PostgreSQL type.
+    Pg(pgrepr::Type),
+    /// A custom list type.
+    List {
+        /// The ID of the list's element type.
+        element_id: GlobalId,
+    },
+    /// A custom array type.
+    Map {
+        /// The ID of the map's key type.
+        key_id: GlobalId,
+        /// The ID of the map's value type.
+        value_id: GlobalId,
+    },
 }
 
 /// An error returned by the catalog.
@@ -434,10 +450,6 @@ impl SessionCatalog for DummyCatalog {
 
     fn item_exists(&self, _: &FullName) -> bool {
         false
-    }
-
-    fn try_get_lossy_scalar_type_by_id(&self, _: &GlobalId) -> Option<ScalarType> {
-        None
     }
 
     fn config(&self) -> &CatalogConfig {

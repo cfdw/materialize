@@ -117,6 +117,11 @@ impl UnresolvedObjectName {
         UnresolvedObjectName(vec![Ident::new(n)])
     }
 
+    /// Creates a `pg_catalog`-prefixed `ObjectName`.
+    pub fn pg_catalog(n: &str) -> UnresolvedObjectName {
+        UnresolvedObjectName(vec![Ident::new("pg_catalog"), Ident::new(n)])
+    }
+
     /// Creates an `ObjectName` with an [`Ident`] for each element of `n`.
     ///
     /// Panics if passed an in ineligible `&[&str]` whose length is 0 or greater

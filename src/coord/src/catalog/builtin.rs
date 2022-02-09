@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lazy_static::lazy_static;
-use postgres_types::{Kind, Type};
+use postgres_types::Type;
 
 use dataflow_types::logging::{DifferentialLog, LogVariant, MaterializedLog, TimelyLog};
 use expr::GlobalId;
@@ -116,10 +116,6 @@ impl BuiltinType {
 
     pub fn oid(&self) -> u32 {
         self.pgtype.oid()
-    }
-
-    pub fn kind(&self) -> &Kind {
-        self.pgtype.kind()
     }
 }
 

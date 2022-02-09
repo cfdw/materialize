@@ -149,7 +149,8 @@ impl Type {
         }
     }
 
-    pub(crate) fn inner(&self) -> &'static postgres_types::Type {
+    /// Returns the inner PostgreSQL type.
+    pub fn inner(&self) -> &'static postgres_types::Type {
         match self {
             Type::Array(t) => match &**t {
                 Type::Array(_) => unreachable!(),

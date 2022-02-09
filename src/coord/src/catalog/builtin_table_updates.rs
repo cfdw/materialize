@@ -15,8 +15,10 @@ use ore::collections::CollectionExt;
 use repr::adt::array::ArrayDimension;
 use repr::{Datum, Diff, Row};
 use sql::ast::{CreateIndexStatement, Statement};
+use sql::catalog::CatalogType;
 use sql::names::DatabaseSpecifier;
 use sql_parser::ast::display::AstDisplay;
+use tokio_postgres::types::Kind as PostgresKind;
 
 use crate::catalog::builtin::{
     MZ_ARRAY_TYPES, MZ_AVRO_OCF_SINKS, MZ_BASE_TYPES, MZ_COLUMNS, MZ_DATABASES, MZ_FUNCTIONS,
@@ -25,7 +27,7 @@ use crate::catalog::builtin::{
 };
 use crate::catalog::{
     CatalogItem, CatalogState, Func, Index, Sink, SinkConnector, SinkConnectorState, Source, Table,
-    Type, TypeInner, SYSTEM_CONN_ID,
+    Type, SYSTEM_CONN_ID,
 };
 
 /// An update to a built-in table.
@@ -362,21 +364,27 @@ impl CatalogState {
             diff,
         };
 
-        let (index_id, update) = match typ.inner {
-            TypeInner::Array { element_id } => (
-                MZ_ARRAY_TYPES.id,
-                vec![id.to_string(), element_id.to_string()],
-            ),
-            TypeInner::Base => (MZ_BASE_TYPES.id, vec![id.to_string()]),
-            TypeInner::List { element_id } => (
+        let (index_id, update) = match &typ.inner {
+            CatalogType::Pg(pg) => match pg.inner().kind() {
+                PostgresKind::Array(element_type) => (
+                    MZ_ARRAY_TYPES.id,
+                    vec![
+                        id.to_string(),
+                        self.get_by_oid(&element_type.oid()).id().to_string(),
+                    ],
+                ),
+                PostgresKind::Simple => (MZ_BASE_TYPES.id, vec![id.to_string()]),
+                PostgresKind::Pseudo => (MZ_PSEUDO_TYPES.id, vec![id.to_string()]),
+                _ => unreachable!(),
+            },
+            CatalogType::List { element_id } => (
                 MZ_LIST_TYPES.id,
                 vec![id.to_string(), element_id.to_string()],
             ),
-            TypeInner::Map { key_id, value_id } => (
+            CatalogType::Map { key_id, value_id } => (
                 MZ_MAP_TYPES.id,
                 vec![id.to_string(), key_id.to_string(), value_id.to_string()],
             ),
-            TypeInner::Pseudo => (MZ_PSEUDO_TYPES.id, vec![id.to_string()]),
         };
         let specific_update = BuiltinTableUpdate {
             id: index_id,

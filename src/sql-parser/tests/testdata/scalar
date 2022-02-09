@@ -103,7 +103,7 @@ Op { op: Bare("!~*"), expr1: Identifier([Ident("a")]), expr2: Some(Value(String(
 parse-scalar
 a !x 'foo'
 ----
-Op { op: Bare("!"), expr1: Identifier([Ident("a")]), expr2: Some(Cast { expr: Value(String("foo")), data_type: Other { name: Name(UnresolvedObjectName([Ident("x")])), typ_mod: [] } }) }
+Op { op: Bare("!"), expr1: Identifier([Ident("a")]), expr2: Some(Cast { expr: Value(String("foo")), data_type: Normal { name: Name(UnresolvedObjectName([Ident("x")])), modifiers: [] } }) }
 
 parse-scalar
 a !x
@@ -115,7 +115,7 @@ Op { op: Bare("!"), expr1: Identifier([Ident("a")]), expr2: Some(Identifier([Ide
 parse-scalar roundtrip
 id::bigint
 ----
-id::int8
+id::bigint
 
 parse-scalar roundtrip
 id::map[text=>int4]
@@ -125,22 +125,22 @@ id::map[text=>int4]
 parse-scalar roundtrip
 CAST(id AS BIGINT)
 ----
-id::int8
+id::bigint
 
 parse-scalar roundtrip
 id::double precision
 ----
-id::float8
+id::pg_catalog.float8
 
 parse-scalar roundtrip
 id::timestamp with time zone
 ----
-id::timestamptz
+id::pg_catalog.timestamptz
 
 parse-scalar roundtrip
 (id::timestamp with time zone::timestamp without time zone  )  ::  double precision::text
 ----
-(id::timestamptz::timestamp)::float8::text
+(id::pg_catalog.timestamptz::pg_catalog.timestamp)::pg_catalog.float8::text
 
 parse-scalar roundtrip
 CAST(c::jsonb->>'f' AS timestamptz)
@@ -157,12 +157,12 @@ id::numeric FROM customer
 parse-scalar roundtrip
 CAST(id AS dec)
 ----
-id::numeric
+id::dec
 
 parse-scalar roundtrip
 CAST(id AS decimal)
 ----
-id::numeric
+id::decimal
 
 # Extract
 
@@ -484,17 +484,17 @@ address[1:list_length(address) - 1]
 parse-scalar
 ARRAY[]::int[]
 ----
-Cast { expr: Array([]), data_type: Array(Other { name: Name(UnresolvedObjectName([Ident("int4")])), typ_mod: [] }) }
+Cast { expr: Array([]), data_type: Array(Normal { name: Name(UnresolvedObjectName([Ident("int")])), modifiers: [] }) }
 
 parse-scalar
 ARRAY[]::int[][][][]
 ----
-Cast { expr: Array([]), data_type: Array(Other { name: Name(UnresolvedObjectName([Ident("int4")])), typ_mod: [] }) }
+Cast { expr: Array([]), data_type: Array(Normal { name: Name(UnresolvedObjectName([Ident("int")])), modifiers: [] }) }
 
 parse-scalar
 ARRAY[]::int[2][2]
 ----
-Cast { expr: Array([]), data_type: Array(Other { name: Name(UnresolvedObjectName([Ident("int4")])), typ_mod: [] }) }
+Cast { expr: Array([]), data_type: Array(Normal { name: Name(UnresolvedObjectName([Ident("int")])), modifiers: [] }) }
 
 parse-scalar
 a -> b

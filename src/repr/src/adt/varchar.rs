@@ -11,8 +11,6 @@ use std::ops::Deref;
 
 use anyhow::bail;
 
-use super::util;
-
 // https://github.com/postgres/postgres/blob/REL_14_0/src/include/access/htup_details.h#L577-L584
 pub const MAX_LENGTH: i32 = 10_485_760;
 
@@ -25,19 +23,6 @@ impl<S: AsRef<str>> Deref for VarChar<S> {
     fn deref(&self) -> &Self::Target {
         self.0.as_ref()
     }
-}
-
-pub fn extract_typ_mod(typ_mod: &[u64]) -> Result<Option<usize>, anyhow::Error> {
-    let typ_mod = util::extract_typ_mod::<usize>(
-        "character varying",
-        typ_mod,
-        &[(
-            "length",
-            1,
-            usize::try_from(MAX_LENGTH).expect("max length is positive"),
-        )],
-    )?;
-    Ok(typ_mod.get(0).cloned())
 }
 
 pub fn format_str(

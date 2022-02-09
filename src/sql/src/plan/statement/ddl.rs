@@ -63,7 +63,7 @@ use crate::ast::{
     SourceIncludeMetadataType, SqlOption, Statement, TableConstraint, UnresolvedObjectName, Value,
     ViewDefinition, WithOption,
 };
-use crate::catalog::{CatalogItem, CatalogItemType};
+use crate::catalog::{CatalogItem, CatalogItemType, CatalogType};
 use crate::kafka_util;
 use crate::names::{DatabaseSpecifier, FullName, SchemaName};
 use crate::normalize;
@@ -76,7 +76,7 @@ use crate::plan::{
     CreateIndexPlan, CreateRolePlan, CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan,
     CreateTablePlan, CreateTypePlan, CreateViewPlan, CreateViewsPlan, DropDatabasePlan,
     DropItemsPlan, DropRolesPlan, DropSchemaPlan, HirRelationExpr, Index, IndexOption,
-    IndexOptionName, Params, Plan, Sink, Source, Table, Type, TypeInner, View,
+    IndexOptionName, Params, Plan, Sink, Source, Table, Type, View,
 };
 use crate::pure::Schema;
 
@@ -2101,10 +2101,10 @@ pub fn plan_create_type(
     for key in option_keys {
         let item_name = match with_options.remove(&key.to_string()) {
             Some(SqlOption::DataType { data_type, .. }) => match data_type {
-                DataType::Other { name, typ_mod } => {
-                    if !typ_mod.is_empty() {
+                DataType::Normal { name, modifiers } => {
+                    if !modifiers.is_empty() {
                         bail!(
-                            "CREATE TYPE ... AS {}option {} cannot accept type modifier on \
+                            "CREATE TYPE ... AS {}option {} cannot accept type modifiers on \
                             {}, you must use the default type",
                             as_type.to_string().quoted(),
                             key,
@@ -2130,14 +2130,14 @@ pub fn plan_create_type(
                 item_name.name().clone(),
             )?)?;
         let item_id = item.id();
-        match scx.catalog.try_get_lossy_scalar_type_by_id(&item_id) {
+        match scx.catalog.get_item_by_id(&item_id).type_details() {
             None => bail!(
                 "{} must be of class type, but received {} which is of class {}",
                 key,
                 item.name(),
                 item.item_type()
             ),
-            Some(ScalarType::Char { .. }) if as_type == CreateTypeAs::List => {
+            Some(CatalogType::Pg(pgrepr::Type::Char)) if as_type == CreateTypeAs::List => {
                 bail_unsupported!("char list")
             }
             _ => {}
@@ -2153,21 +2153,19 @@ pub fn plan_create_type(
     }
 
     let inner = match as_type {
-        CreateTypeAs::List => TypeInner::List {
+        CreateTypeAs::List => CatalogType::List {
             element_id: *ids.get(0).expect("custom type to have element id"),
         },
         CreateTypeAs::Map => {
             let key_id = *ids.get(0).expect("key");
-            match scx.catalog.try_get_lossy_scalar_type_by_id(&key_id) {
-                Some(ScalarType::String) => {}
-                Some(t) => bail!(
-                    "key_type must be text, got {}",
-                    scx.humanize_scalar_type(&t)
-                ),
+            let entry = scx.catalog.get_item_by_id(&key_id);
+            match entry.type_details() {
+                Some(CatalogType::Pg(pgrepr::Type::Text)) => {}
+                Some(_) => bail!("key_type must be text, got {}", entry.name()),
                 None => unreachable!("already guaranteed id correlates to a type"),
             }
 
-            TypeInner::Map {
+            CatalogType::Map {
                 key_id,
                 value_id: *ids.get(1).expect("value"),
             }

@@ -293,14 +293,14 @@ fn ast_rewrite_pg_catalog_char_to_text_0_9_1(
 
     impl<'ast> VisitMut<'ast, Raw> for TypeNormalizer {
         fn visit_data_type_mut(&mut self, data_type: &'ast mut DataType<Raw>) {
-            if let DataType::Other { name, typ_mod } = data_type {
+            if let DataType::Normal { name, modifiers } = data_type {
                 if name.name() == &*CHAR_REFERENCE {
                     let t = TEXT_REFERENCE.clone();
                     *name = match name {
                         RawName::Name(_) => RawName::Name(t),
                         RawName::Id(id, _) => RawName::Id(id.clone(), t),
                     };
-                    *typ_mod = vec![];
+                    *modifiers = vec![];
                 }
             }
         }
@@ -556,7 +556,7 @@ fn ast_rewrite_type_references_0_6_1(
 
     impl<'ast> VisitMut<'ast, Raw> for TypeNormalizer {
         fn visit_data_type_mut(&mut self, data_type: &'ast mut DataType<Raw>) {
-            if let DataType::Other { name, .. } = data_type {
+            if let DataType::Normal { name, .. } = data_type {
                 let mut unresolved_name = name.name().clone();
                 if unresolved_name.0.len() == 1 {
                     unresolved_name = UnresolvedObjectName(vec![
