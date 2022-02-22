@@ -23,6 +23,7 @@ use mz_expr::{DummyHumanizer, ExprHumanizer, GlobalId, MirScalarExpr};
 use mz_lowertest::*;
 use mz_ore::now::{EpochMillis, NOW_ZERO};
 use mz_repr::{RelationDesc, RelationType, ScalarType};
+use mz_sql_parser::ast::Ident;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -219,6 +220,13 @@ impl SessionCatalog for TestCatalog {
             return Ok(result);
         }
         Err(CatalogError::UnknownFunction(partial_name.item.clone()))
+    }
+
+    fn resolve_compute_instance_or_default(
+        &self,
+        _item_name: Option<&str>,
+    ) -> Result<String, CatalogError> {
+        Ok("default".to_owned())
     }
 
     fn get_item_by_id(&self, id: &GlobalId) -> &dyn CatalogItem {

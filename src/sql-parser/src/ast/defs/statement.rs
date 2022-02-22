@@ -46,6 +46,7 @@ pub enum Statement<T: AstInfo> {
     CreateIndex(CreateIndexStatement<T>),
     CreateType(CreateTypeStatement<T>),
     CreateRole(CreateRoleStatement),
+    CreateCluster(CreateClusterStatement),
     AlterObjectRename(AlterObjectRenameStatement),
     AlterIndex(AlterIndexStatement),
     Discard(DiscardStatement),
@@ -95,6 +96,7 @@ impl<T: AstInfo> AstDisplay for Statement<T> {
             Statement::CreateIndex(stmt) => f.write_node(stmt),
             Statement::CreateRole(stmt) => f.write_node(stmt),
             Statement::CreateType(stmt) => f.write_node(stmt),
+            Statement::CreateCluster(stmt) => f.write_node(stmt),
             Statement::AlterObjectRename(stmt) => f.write_node(stmt),
             Statement::AlterIndex(stmt) => f.write_node(stmt),
             Statement::Discard(stmt) => f.write_node(stmt),
@@ -428,6 +430,7 @@ impl_display_t!(CreateSourceStatement);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CreateSinkStatement<T: AstInfo> {
     pub name: UnresolvedObjectName,
+    pub in_cluster: Option<Ident>,
     pub from: UnresolvedObjectName,
     pub connector: CreateSinkConnector<T>,
     pub with_options: Vec<SqlOption<T>>,
@@ -445,6 +448,11 @@ impl<T: AstInfo> AstDisplay for CreateSinkStatement<T> {
             f.write_str("IF NOT EXISTS ");
         }
         f.write_node(&self.name);
+        if let Some(cluster) = &self.in_cluster {
+            f.write_str("IN CLUSTER ");
+            f.write_node(cluster);
+            f.write_str(" ");
+        }
         f.write_str(" FROM ");
         f.write_node(&self.from);
         f.write_str(" INTO ");
@@ -673,6 +681,7 @@ impl_display_t!(CreateTableStatement);
 pub struct CreateIndexStatement<T: AstInfo> {
     /// Optional index name.
     pub name: Option<Ident>,
+    pub in_cluster: Option<Ident>,
     /// `ON` table or view name
     pub on_name: UnresolvedObjectName,
     /// Expressions that form part of the index key. If not included, the
@@ -694,6 +703,11 @@ impl<T: AstInfo> AstDisplay for CreateIndexStatement<T> {
         }
         if let Some(name) = &self.name {
             f.write_node(name);
+            f.write_str(" ");
+        }
+        if let Some(cluster) = &self.in_cluster {
+            f.write_str("IN CLUSTER ");
+            f.write_node(cluster);
             f.write_str(" ");
         }
         f.write_str("ON ");
@@ -799,6 +813,29 @@ impl<T: AstInfo> AstDisplay for CreateTypeStatement<T> {
     }
 }
 impl_display_t!(CreateTypeStatement);
+
+/// `CREATE CLUSTER ..`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CreateClusterStatement {
+    /// Name of the created cluster.
+    pub name: Ident,
+    pub if_not_exists: bool,
+}
+
+impl AstDisplay for CreateClusterStatement {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        f.write_str("CREATE CLUSTER ");
+        if self.if_not_exists {
+            f.write_str("IF NOT EXISTS ");
+        }
+        f.write_node(&self.name);
+
+        if self.if_not_exists {
+            f.write_str("WITH VIRTUAL");
+        };
+    }
+}
+impl_display!(CreateClusterStatement);
 
 /// `CREATE TYPE .. AS <TYPE>`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

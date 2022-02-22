@@ -19,6 +19,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use fail::fail_point;
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use mz_dataflow_types::client::{ComputeInstanceId, DEFAULT_COMPUTE_INSTANCE_ID};
 use mz_dataflow_types::{
     sinks::SinkEnvelope, sources::persistence::EnvelopePersistDesc,
     sources::persistence::SourcePersistDesc, sources::ExternalSourceConnector, sources::MzOffset,
@@ -116,6 +117,12 @@ pub struct CatalogState {
     by_oid: HashMap<u32, GlobalId>,
     ambient_schemas: BTreeMap<String, Schema>,
     temporary_schemas: HashMap<u32, Schema>,
+
+    // We pass around `ComputeInstanceId`, but not the name, though still need
+    // a means by which to correlate names to an ID, necessitating this
+    // two-level lookup.
+    compute_instances_by_id: HashMap<ComputeInstanceId, ComputeInstance>,
+    compute_instance_names: HashMap<String, ComputeInstanceId>,
     roles: HashMap<String, Role>,
     config: mz_sql::catalog::CatalogConfig,
 }
@@ -324,6 +331,7 @@ impl CatalogState {
 pub struct ConnCatalog<'a> {
     catalog: &'a Catalog,
     conn_id: u32,
+    cluster: String,
     database: String,
     search_path: &'a [&'a str],
     user: String,
@@ -361,6 +369,12 @@ pub struct Role {
     pub id: i64,
     #[serde(skip)]
     pub oid: u32,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ComputeInstance {
+    pub name: String,
+    pub id: ComputeInstanceId,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +441,7 @@ pub struct Sink {
     pub envelope: SinkEnvelope,
     pub with_snapshot: bool,
     pub depends_on: Vec<GlobalId>,
+    pub compute_instance_id: ComputeInstanceId,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -456,6 +471,7 @@ pub struct Index {
     // presently hard to have an `enabled` field in `mz_indexes` if this field
     // does not exist in the catalog.
     pub enabled: bool,
+    pub compute_instance_id: ComputeInstanceId,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -662,6 +678,13 @@ impl CatalogEntry {
         }
     }
 
+    pub fn sink(&self) -> Option<&Sink> {
+        match self.item() {
+            CatalogItem::Sink(sink) => Some(sink),
+            _ => None,
+        }
+    }
+
     /// Returns the inner [`Source`] if this entry is a source, else `None`.
     pub fn source(&self) -> Option<&Source> {
         match self.item() {
@@ -711,6 +734,13 @@ impl CatalogEntry {
     pub fn used_by(&self) -> &[GlobalId] {
         &self.used_by
     }
+
+    pub fn supports_indexes(&self) -> bool {
+        match self.item() {
+            CatalogItem::Table(_) | CatalogItem::Source(_) | CatalogItem::View(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Catalog {
@@ -741,6 +771,8 @@ impl Catalog {
                     now: config.now.clone(),
                     disable_user_indexes: config.disable_user_indexes,
                 },
+                compute_instances_by_id: HashMap::new(),
+                compute_instance_names: HashMap::new(),
             },
             oid_counter: FIRST_USER_OID,
             system_index_counter: FIRST_SYSTEM_INDEX_ID,
@@ -805,6 +837,36 @@ impl Catalog {
             );
         }
 
+        let compute_instances = catalog.storage().load_compute_instances()?;
+        // TODO(CREATE+DROP CLUSTER): anything that depends on the default instance must be spun up per-cluster.
+        for (id, name) in compute_instances.into_iter() {
+            let id = id.try_into().expect("no negative compute_instance IDs");
+
+            catalog.state.compute_instances_by_id.insert(
+                id,
+                ComputeInstance {
+                    name: name.clone(),
+                    id,
+                },
+            );
+
+            catalog
+                .state
+                .compute_instance_names
+                .insert(name.clone(), id);
+        }
+
+        assert!(
+            catalog.state.compute_instances_by_id[&DEFAULT_COMPUTE_INSTANCE_ID].id
+                == DEFAULT_COMPUTE_INSTANCE_ID
+        );
+
+        // Pretend we don't know what the default instance name is.
+        let default_instance_name = catalog.state.compute_instances_by_id
+            [&DEFAULT_COMPUTE_INSTANCE_ID]
+            .name
+            .clone();
+
         for builtin in BUILTINS.values() {
             let name = FullName {
                 database: DatabaseSpecifier::Ambient,
@@ -849,6 +911,7 @@ impl Catalog {
                                 .collect(),
                             create_sql: super::coord::index_sql(
                                 index_name,
+                                default_instance_name.clone(),
                                 name,
                                 &log.variant.desc(),
                                 &log.variant.index_by(),
@@ -856,6 +919,7 @@ impl Catalog {
                             conn_id: None,
                             depends_on: vec![log.id],
                             enabled: catalog.index_enabled_by_default(&index_id),
+                            compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
                         }),
                     );
                 }
@@ -988,6 +1052,9 @@ impl Catalog {
         for (role_name, _role) in &catalog.state.roles {
             builtin_table_updates.push(catalog.state.pack_role_update(role_name, 1));
         }
+        for (cluster_name, _id) in &catalog.state.compute_instance_names {
+            builtin_table_updates.push(catalog.state.pack_cluster_update(cluster_name, 1));
+        }
 
         Ok((catalog, builtin_table_updates))
     }
@@ -1081,6 +1148,7 @@ impl Catalog {
         ConnCatalog {
             catalog: self,
             conn_id: session.conn_id(),
+            cluster: session.vars().cluster().into(),
             database: session.vars().database().into(),
             search_path: session.vars().search_path(),
             user: session.user().into(),
@@ -1092,6 +1160,7 @@ impl Catalog {
         ConnCatalog {
             catalog: self,
             conn_id: SYSTEM_CONN_ID,
+            cluster: "materialize".into(),
             database: "materialize".into(),
             search_path: &[],
             user,
@@ -1195,6 +1264,18 @@ impl Catalog {
             name,
             conn_id,
         )
+    }
+
+    pub fn resolve_compute_instance(
+        &self,
+        name: &str,
+    ) -> Result<&ComputeInstance, SqlCatalogError> {
+        let id = self
+            .state
+            .compute_instance_names
+            .get(name)
+            .ok_or(SqlCatalogError::UnknownComputeInstance(name.to_string()))?;
+        Ok(&self.state.compute_instances_by_id[id])
     }
 
     /// Resolves [`PartialName`] into a [`FullName`].
@@ -1548,6 +1629,10 @@ impl Catalog {
                 oid: u32,
                 name: String,
             },
+            CreateCluster {
+                id: ComputeInstanceId,
+                name: String,
+            },
             CreateItem {
                 id: GlobalId,
                 oid: u32,
@@ -1636,6 +1721,20 @@ impl Catalog {
                     vec![Action::CreateRole {
                         id: tx.insert_role(&name)?,
                         oid,
+                        name,
+                    }]
+                }
+                Op::CreateCluster { name } => {
+                    if is_reserved_name(&name) {
+                        return Err(CoordError::Catalog(Error::new(
+                            ErrorKind::ReservedClusterName(name),
+                        )));
+                    }
+                    vec![Action::CreateCluster {
+                        id: tx
+                            .insert_cluster(&name)?
+                            .try_into()
+                            .expect("no negative cluster IDs"),
                         name,
                     }]
                 }
@@ -1877,6 +1976,19 @@ impl Catalog {
                     builtin_table_updates.push(state.pack_role_update(&name, 1));
                 }
 
+                Action::CreateCluster { id, name } => {
+                    info!("create cluster {}", name);
+                    state.compute_instances_by_id.insert(
+                        id,
+                        ComputeInstance {
+                            name: name.clone(),
+                            id,
+                        },
+                    );
+                    state.compute_instance_names.insert(name.clone(), id);
+                    builtin_table_updates.push(state.pack_cluster_update(&name, 1));
+                }
+
                 Action::CreateItem {
                     id,
                     oid,
@@ -2086,6 +2198,8 @@ impl Catalog {
                 conn_id: None,
                 depends_on: index.depends_on,
                 enabled: self.index_enabled_by_default(&id),
+                // TODO: Get instance from plan
+                compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
             }),
             Plan::CreateSink(CreateSinkPlan {
                 sink,
@@ -2098,6 +2212,8 @@ impl Catalog {
                 envelope: sink.envelope,
                 with_snapshot,
                 depends_on: sink.depends_on,
+                // TODO: Get instance from plan
+                compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
             }),
             Plan::CreateType(CreateTypePlan { typ, .. }) => CatalogItem::Type(Type {
                 create_sql: typ.create_sql,
@@ -2161,6 +2277,16 @@ impl Catalog {
     pub fn entries(&self) -> impl Iterator<Item = &CatalogEntry> {
         self.state.by_id.values()
     }
+
+    pub fn compute_instances(
+        &self,
+    ) -> impl Iterator<Item = (&ComputeInstanceId, &ComputeInstance)> {
+        self.state.compute_instances_by_id.iter()
+    }
+
+    pub fn get_most_recent_compute_instance(&mut self) -> Result<i64, Error> {
+        self.storage().get_most_recent_compute_instance()
+    }
 }
 
 fn is_reserved_name(name: &str) -> bool {
@@ -2181,6 +2307,9 @@ pub enum Op {
     CreateRole {
         name: String,
         oid: u32,
+    },
+    CreateCluster {
+        name: String,
     },
     CreateItem {
         id: GlobalId,
@@ -2450,6 +2579,16 @@ impl SessionCatalog for ConnCatalog<'_> {
         Ok(self
             .catalog
             .resolve_function(&self.database, self.search_path, name, self.conn_id)?)
+    }
+
+    fn resolve_compute_instance_or_default(
+        &self,
+        name: Option<&str>,
+    ) -> Result<String, SqlCatalogError> {
+        Ok(match name {
+            None => self.cluster.clone(),
+            Some(name) => self.catalog.resolve_compute_instance(name)?.name.clone(),
+        })
     }
 
     fn try_get_item_by_id(&self, id: &GlobalId) -> Option<&dyn mz_sql::catalog::CatalogItem> {

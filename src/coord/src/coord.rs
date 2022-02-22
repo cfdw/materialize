@@ -127,12 +127,12 @@ use mz_sql::catalog::{CatalogError, CatalogTypeDetails, SessionCatalog as _};
 use mz_sql::names::{DatabaseSpecifier, FullName};
 use mz_sql::plan::{
     AlterIndexEnablePlan, AlterIndexResetOptionsPlan, AlterIndexSetOptionsPlan,
-    AlterItemRenamePlan, CreateDatabasePlan, CreateIndexPlan, CreateRolePlan, CreateSchemaPlan,
-    CreateSinkPlan, CreateSourcePlan, CreateTablePlan, CreateTypePlan, CreateViewPlan,
-    CreateViewsPlan, DropDatabasePlan, DropItemsPlan, DropRolesPlan, DropSchemaPlan, ExecutePlan,
-    ExplainPlan, FetchPlan, HirRelationExpr, IndexOption, IndexOptionName, InsertPlan,
-    MutationKind, Params, PeekPlan, Plan, QueryWhen, RaisePlan, ReadThenWritePlan, SendDiffsPlan,
-    SetVariablePlan, ShowVariablePlan, TailFrom, TailPlan,
+    AlterItemRenamePlan, CreateClusterPlan, CreateDatabasePlan, CreateIndexPlan, CreateRolePlan,
+    CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan, CreateTablePlan, CreateTypePlan,
+    CreateViewPlan, CreateViewsPlan, DropDatabasePlan, DropItemsPlan, DropRolesPlan,
+    DropSchemaPlan, ExecutePlan, ExplainPlan, FetchPlan, HirRelationExpr, IndexOption,
+    IndexOptionName, InsertPlan, MutationKind, Params, PeekPlan, Plan, QueryWhen, RaisePlan,
+    ReadThenWritePlan, SendDiffsPlan, SetVariablePlan, ShowVariablePlan, TailFrom, TailPlan,
 };
 use mz_sql::plan::{OptimizerConfig, StatementDesc, View};
 use mz_transform::Optimizer;
@@ -1165,6 +1165,7 @@ impl Coordinator {
                                 | Statement::CreateDatabase(_)
                                 | Statement::CreateIndex(_)
                                 | Statement::CreateRole(_)
+                                | Statement::CreateCluster(_)
                                 | Statement::CreateSchema(_)
                                 | Statement::CreateSink(_)
                                 | Statement::CreateSource(_)
@@ -1598,6 +1599,9 @@ impl Coordinator {
             Plan::CreateRole(plan) => {
                 tx.send(self.sequence_create_role(plan).await, session);
             }
+            Plan::CreateCluster(plan) => {
+                tx.send(self.sequence_create_cluster(plan).await, session);
+            }
             Plan::CreateTable(plan) => {
                 tx.send(self.sequence_create_table(&session, plan).await, session);
             }
@@ -1897,6 +1901,32 @@ impl Coordinator {
             .map(|_| ExecuteResponse::CreatedRole)
     }
 
+    async fn sequence_create_cluster(
+        &mut self,
+        plan: CreateClusterPlan,
+    ) -> Result<ExecuteResponse, CoordError> {
+        let op = catalog::Op::CreateCluster { name: plan.name };
+        let r = self.catalog_transact(vec![op]).await;
+        match r {
+            Ok(()) => {
+                let new_instance = self.catalog.get_most_recent_compute_instance().unwrap();
+                self.dataflow_client
+                    .create_instance(
+                        new_instance.try_into().expect("no negative instance IDs"),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                Ok(ExecuteResponse::CreatedCluster { existed: false })
+            }
+            Err(CoordError::Catalog(catalog::Error {
+                kind: catalog::ErrorKind::ClusterAlreadyExists(_),
+                ..
+            })) if plan.if_not_exists => Ok(ExecuteResponse::CreatedCluster { existed: true }),
+            Err(err) => Err(err),
+        }
+    }
+
     async fn sequence_create_table(
         &mut self,
         session: &Session,
@@ -2115,6 +2145,9 @@ impl Coordinator {
                     .catalog
                     .for_session(session)
                     .find_available_name(index_name);
+                // TODO: Use materialized Option<String> for instance name
+                let instance_name = session.vars().cluster();
+                let instance_id = self.catalog.resolve_compute_instance(&instance_name)?.id;
                 let index_id = self.catalog.allocate_user_id()?;
                 let index = auto_generate_primary_idx(
                     index_name.item.clone(),
@@ -2124,6 +2157,8 @@ impl Coordinator {
                     None,
                     vec![source_id],
                     self.catalog.index_enabled_by_default(&index_id),
+                    instance_name.into(),
+                    instance_id,
                 );
                 let index_oid = self.catalog.allocate_oid()?;
                 ops.push(catalog::Op::CreateItem {
@@ -2174,6 +2209,12 @@ impl Coordinator {
             }
         };
 
+        let compute_instance_id = self
+            .catalog
+            .resolve_compute_instance(&sink.in_cluster)
+            .unwrap()
+            .id;
+
         // Then try to create a placeholder catalog item with an unknown
         // connector. If that fails, we're done, though if the client specified
         // `if_not_exists` we'll tell the client we succeeded.
@@ -2191,6 +2232,7 @@ impl Coordinator {
                 envelope: sink.envelope,
                 with_snapshot,
                 depends_on: sink.depends_on,
+                compute_instance_id,
             }),
         };
 
@@ -2305,6 +2347,9 @@ impl Coordinator {
                 .for_session(session)
                 .find_available_name(index_name);
             let index_id = self.catalog.allocate_user_id()?;
+            // TODO: Use materialized Option<String> for instance name
+            let instance_name = session.vars().cluster();
+            let instance_id = self.catalog.resolve_compute_instance(&instance_name)?.id;
             let index = auto_generate_primary_idx(
                 index_name.item.clone(),
                 name,
@@ -2313,6 +2358,8 @@ impl Coordinator {
                 view.conn_id,
                 vec![view_id],
                 self.catalog.index_enabled_by_default(&index_id),
+                instance_name.into(),
+                instance_id,
             );
             let index_oid = self.catalog.allocate_oid()?;
             ops.push(catalog::Op::CreateItem {
@@ -2417,6 +2464,7 @@ impl Coordinator {
             if_not_exists,
         } = plan;
 
+        let compute_instance_id = self.catalog.resolve_compute_instance(&index.in_cluster)?.id;
         let id = self.catalog.allocate_user_id()?;
         let index = catalog::Index {
             create_sql: index.create_sql,
@@ -2425,6 +2473,7 @@ impl Coordinator {
             conn_id: None,
             depends_on: index.depends_on,
             enabled: self.catalog.index_enabled_by_default(&id),
+            compute_instance_id,
         };
         let oid = self.catalog.allocate_oid()?;
         let op = catalog::Op::CreateItem {
@@ -4516,10 +4565,12 @@ fn auto_generate_primary_idx(
     conn_id: Option<u32>,
     depends_on: Vec<GlobalId>,
     enabled: bool,
+    in_cluster: String,
+    compute_instance_id: ComputeInstanceId,
 ) -> catalog::Index {
     let default_key = on_desc.typ().default_key();
     catalog::Index {
-        create_sql: index_sql(index_name, on_name, &on_desc, &default_key),
+        create_sql: index_sql(index_name, in_cluster, on_name, &on_desc, &default_key),
         on: on_id,
         keys: default_key
             .iter()
@@ -4528,6 +4579,7 @@ fn auto_generate_primary_idx(
         conn_id,
         depends_on,
         enabled,
+        compute_instance_id,
     }
 }
 
@@ -4535,6 +4587,7 @@ fn auto_generate_primary_idx(
 // the responsibility of the SQL package.
 pub fn index_sql(
     index_name: String,
+    in_cluster: String,
     view_name: FullName,
     view_desc: &RelationDesc,
     keys: &[usize],
@@ -4543,6 +4596,7 @@ pub fn index_sql(
 
     CreateIndexStatement::<Raw> {
         name: Some(Ident::new(index_name)),
+        in_cluster: Some(Ident::new(in_cluster)),
         on_name: mz_sql::normalize::unresolve(view_name),
         key_parts: Some(
             keys.iter()

@@ -112,6 +112,7 @@ pub fn describe(
         Statement::CreateIndex(stmt) => ddl::describe_create_index(&scx, stmt)?,
         Statement::CreateType(stmt) => ddl::describe_create_type(&scx, stmt)?,
         Statement::CreateRole(stmt) => ddl::describe_create_role(&scx, stmt)?,
+        Statement::CreateCluster(stmt) => ddl::describe_create_cluster(&scx, stmt)?,
         Statement::DropDatabase(stmt) => ddl::describe_drop_database(&scx, stmt)?,
         Statement::DropObjects(stmt) => ddl::describe_drop_objects(&scx, stmt)?,
         Statement::AlterObjectRename(stmt) => ddl::describe_alter_object_rename(&scx, stmt)?,
@@ -202,6 +203,7 @@ pub fn plan(
         Statement::CreateIndex(stmt) => ddl::plan_create_index(scx, stmt),
         Statement::CreateType(stmt) => ddl::plan_create_type(scx, stmt),
         Statement::CreateRole(stmt) => ddl::plan_create_role(scx, stmt),
+        Statement::CreateCluster(stmt) => ddl::plan_create_cluster(scx, stmt),
         Statement::DropDatabase(stmt) => ddl::plan_drop_database(scx, stmt),
         Statement::DropObjects(stmt) => ddl::plan_drop_objects(scx, stmt),
         Statement::AlterIndex(stmt) => ddl::plan_alter_index_options(scx, stmt),
@@ -381,6 +383,11 @@ impl<'a> StatementContext<'a> {
     ) -> Result<&dyn CatalogItem, PlanError> {
         let name = normalize::unresolved_object_name(name)?;
         Ok(self.catalog.resolve_function(&name)?)
+    }
+
+    pub fn resolve_cluster(&self, name: &Option<Ident>) -> Result<String, PlanError> {
+        let name = name.as_ref().map(|name| name.as_str());
+        Ok(self.catalog.resolve_compute_instance_or_default(name)?)
     }
 
     pub fn get_item_by_id(&self, id: &GlobalId) -> &dyn CatalogItem {

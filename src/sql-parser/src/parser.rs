@@ -1565,6 +1565,8 @@ impl<'a> Parser<'a> {
             self.parse_create_type()
         } else if self.peek_keyword(ROLE) || self.peek_keyword(USER) {
             self.parse_create_role()
+        } else if self.peek_keyword(CLUSTER) {
+            self.parse_create_cluster()
         } else if self.peek_keyword(INDEX) || self.peek_keywords(&[DEFAULT, INDEX]) {
             self.parse_create_index()
         } else if self.peek_keyword(SOURCE) || self.peek_keywords(&[MATERIALIZED, SOURCE]) {
@@ -1962,6 +1964,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(SINK)?;
         let if_not_exists = self.parse_if_not_exists()?;
         let name = self.parse_object_name()?;
+        let in_cluster = self.parse_optional_in_cluster()?;
         self.expect_keyword(FROM)?;
         let from = self.parse_object_name()?;
         self.expect_keyword(INTO)?;
@@ -1998,6 +2001,7 @@ impl<'a> Parser<'a> {
         let as_of = self.parse_optional_as_of()?;
         Ok(Statement::CreateSink(CreateSinkStatement {
             name,
+            in_cluster,
             from,
             connector,
             with_options,
@@ -2306,17 +2310,19 @@ impl<'a> Parser<'a> {
         self.expect_keyword(INDEX)?;
 
         let if_not_exists = self.parse_if_not_exists()?;
-        let name = if self.parse_keyword(ON) {
+        let (name, in_cluster) = if self.parse_keyword(ON) {
             if if_not_exists && !default_index {
                 self.prev_token();
                 return self.expected(self.peek_pos(), "index name", self.peek_token());
             }
-            None
+            (None, None)
         } else {
             let name = self.parse_identifier()?;
+            let in_cluster = self.parse_optional_in_cluster()?;
             self.expect_keyword(ON)?;
-            Some(name)
+            (Some(name), in_cluster)
         };
+
         let on_name = self.parse_object_name()?;
 
         // Arrangements are the only index type we support, so we can just ignore this
@@ -2345,11 +2351,20 @@ impl<'a> Parser<'a> {
 
         Ok(Statement::CreateIndex(CreateIndexStatement {
             name,
+            in_cluster,
             on_name,
             key_parts,
             with_options,
             if_not_exists,
         }))
+    }
+
+    fn parse_optional_in_cluster(&mut self) -> Result<Option<Ident>, ParserError> {
+        Ok(if self.parse_keywords(&[IN, CLUSTER]) {
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        })
     }
 
     fn parse_create_role(&mut self) -> Result<Statement<Raw>, ParserError> {
@@ -2415,6 +2430,38 @@ impl<'a> Parser<'a> {
             name,
             data_type: self.parse_data_type()?,
         })
+    }
+
+    fn parse_create_cluster(&mut self) -> Result<Statement<Raw>, ParserError> {
+        self.next_token();
+        let if_not_exists = self.parse_if_not_exists()?;
+        let name = self.parse_identifier()?;
+
+        let with = self.parse_keyword(WITH);
+
+        let options = if with || self.peek_keyword(VIRTUAL) {
+            self.parse_comma_separated(|parser| {
+                parser.expect_keyword(VIRTUAL)?;
+                Ok(())
+            })?
+        } else {
+            vec![]
+        };
+
+        if options.len() > 1 {
+            // We only have one option; this will need to change when you can
+            // specify e.g. SIZE.
+            return parser_err!(
+                self,
+                self.peek_prev_pos(),
+                "same option specified more than once"
+            );
+        }
+
+        Ok(Statement::CreateCluster(CreateClusterStatement {
+            name,
+            if_not_exists,
+        }))
     }
 
     fn parse_if_exists(&mut self) -> Result<bool, ParserError> {

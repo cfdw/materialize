@@ -54,6 +54,7 @@ Character
 Characteristics
 Check
 Close
+Cluster
 Coalesce
 Collate
 Columns
@@ -296,6 +297,7 @@ Varchar
 Varying
 View
 Views
+Virtual
 Warning
 When
 Where

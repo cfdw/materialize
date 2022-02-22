@@ -73,6 +73,7 @@ pub enum Plan {
     CreateDatabase(CreateDatabasePlan),
     CreateSchema(CreateSchemaPlan),
     CreateRole(CreateRolePlan),
+    CreateCluster(CreateClusterPlan),
     CreateSource(CreateSourcePlan),
     CreateSink(CreateSinkPlan),
     CreateTable(CreateTablePlan),
@@ -136,6 +137,12 @@ pub struct CreateSchemaPlan {
 #[derive(Debug)]
 pub struct CreateRolePlan {
     pub name: String,
+}
+
+#[derive(Debug)]
+pub struct CreateClusterPlan {
+    pub name: String,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug)]
@@ -390,6 +397,7 @@ pub struct Sink {
     pub connector_builder: SinkConnectorBuilder,
     pub envelope: SinkEnvelope,
     pub depends_on: Vec<GlobalId>,
+    pub in_cluster: String,
 }
 
 #[derive(Clone, Debug)]
@@ -407,6 +415,7 @@ pub struct Index {
     pub on: GlobalId,
     pub keys: Vec<mz_expr::MirScalarExpr>,
     pub depends_on: Vec<GlobalId>,
+    pub in_cluster: String,
 }
 
 #[derive(Clone, Debug)]
