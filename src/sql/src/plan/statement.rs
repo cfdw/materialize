@@ -22,7 +22,8 @@ use mz_repr::{ColumnType, RelationDesc, ScalarType};
 
 use crate::ast::{Ident, ObjectType, Raw, Statement, UnresolvedObjectName};
 use crate::catalog::{
-    CatalogDatabase, CatalogItem, CatalogItemType, CatalogSchema, SessionCatalog,
+    CatalogComputeInstance, CatalogDatabase, CatalogItem, CatalogItemType, CatalogSchema,
+    SessionCatalog,
 };
 use crate::names::{DatabaseSpecifier, FullName, PartialName};
 use crate::normalize;
@@ -385,9 +386,12 @@ impl<'a> StatementContext<'a> {
         Ok(self.catalog.resolve_function(&name)?)
     }
 
-    pub fn resolve_cluster(&self, name: &Option<Ident>) -> Result<String, PlanError> {
-        let name = name.as_ref().map(|name| name.as_str());
-        Ok(self.catalog.resolve_compute_instance_or_default(name)?)
+    pub fn resolve_compute_instance(
+        &self,
+        name: Option<&Ident>,
+    ) -> Result<&dyn CatalogComputeInstance, PlanError> {
+        let name = name.map(|name| name.as_str());
+        Ok(self.catalog.resolve_compute_instance(name)?)
     }
 
     pub fn get_item_by_id(&self, id: &GlobalId) -> &dyn CatalogItem {

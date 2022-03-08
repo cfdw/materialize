@@ -387,15 +387,6 @@ impl Connection {
             .collect()
     }
 
-    pub fn get_most_recent_compute_instance(&mut self) -> Result<i64, Error> {
-        let tx = self.inner.transaction()?;
-        Ok(
-            tx.query_row("SELECT max(id) FROM compute_instances;", params![], |row| {
-                row.get(0)
-            })?,
-        )
-    }
-
     pub fn allocate_id(&mut self) -> Result<GlobalId, Error> {
         let tx = self.inner.transaction()?;
         // SQLite doesn't support u64s, so we constrain ourselves to the more
@@ -580,7 +571,7 @@ impl Transaction<'_> {
         }
     }
 
-    pub fn insert_cluster(&mut self, cluster_name: &str) -> Result<i64, Error> {
+    pub fn insert_compute_instance(&mut self, cluster_name: &str) -> Result<i64, Error> {
         match self
             .inner
             .prepare_cached("INSERT INTO compute_instances (name) VALUES (?)")?
@@ -718,6 +709,19 @@ impl Transaction<'_> {
             Ok(())
         } else {
             Err(SqlCatalogError::UnknownRole(name.to_owned()).into())
+        }
+    }
+
+    pub fn remove_compute_instance(&self, name: &str) -> Result<(), Error> {
+        let n = self
+            .inner
+            .prepare_cached("DELETE FROM compute_instances WHERE name = ?")?
+            .execute(params![name])?;
+        assert!(n <= 1);
+        if n == 1 {
+            Ok(())
+        } else {
+            Err(SqlCatalogError::UnknownComputeInstance(name.to_owned()).into())
         }
     }
 

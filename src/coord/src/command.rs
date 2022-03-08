@@ -230,6 +230,8 @@ pub enum ExecuteResponse {
     DiscardedAll,
     /// The requested database was dropped.
     DroppedDatabase,
+    /// The requested cluster was dropped.
+    DroppedCluster,
     /// The requested role was dropped.
     DroppedRole,
     /// The requested schema was dropped.

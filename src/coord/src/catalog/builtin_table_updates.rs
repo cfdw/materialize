@@ -92,18 +92,15 @@ impl CatalogState {
         }
     }
 
-    pub(super) fn pack_cluster_update(&self, name: &str, diff: Diff) -> BuiltinTableUpdate {
-        let compute_instance_id = &self.compute_instance_names[name];
+    pub(super) fn pack_compute_instance_update(
+        &self,
+        name: &str,
+        diff: Diff,
+    ) -> BuiltinTableUpdate {
+        let compute_instance_id = &self.compute_instances_by_name[name];
         BuiltinTableUpdate {
             id: MZ_CLUSTERS.id,
-            row: Row::pack_slice(&[
-                Datum::Int64(
-                    (*compute_instance_id)
-                        .try_into()
-                        .expect("no more than i64::MAX clusters"),
-                ),
-                Datum::String(&name),
-            ]),
+            row: Row::pack_slice(&[Datum::Int64(*compute_instance_id), Datum::String(&name)]),
             diff,
         }
     }

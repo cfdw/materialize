@@ -55,6 +55,7 @@ Characteristics
 Check
 Close
 Cluster
+Clusters
 Coalesce
 Collate
 Columns
@@ -247,6 +248,7 @@ Set
 Show
 Sink
 Sinks
+Size
 Slot
 Smallint
 Snapshot

@@ -61,7 +61,7 @@ const CLIENT_MIN_MESSAGES: ServerVar<ClientSeverity> = ServerVar {
 const CLUSTER: ServerVar<str> = ServerVar {
     name: static_uncased_str!("cluster"),
     value: "default",
-    description: "Sets the default cluster.",
+    description: "[EXPERIMENTAL] Sets the current cluster (Materialize).",
 };
 
 const DATABASE: ServerVar<str> = ServerVar {
@@ -347,7 +347,7 @@ impl Vars {
                 });
             }
         } else if name == CLUSTER.name {
-            Err(CoordError::ReadOnlyParameter(&CLUSTER))
+            self.cluster.set(value, local)
         } else if name == DATABASE.name {
             self.database.set(value, local)
         } else if name == DATE_STYLE.name {

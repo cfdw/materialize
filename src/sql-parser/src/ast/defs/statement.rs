@@ -819,7 +819,10 @@ impl_display_t!(CreateTypeStatement);
 pub struct CreateClusterStatement {
     /// Name of the created cluster.
     pub name: Ident,
+    /// Whether the `IF NOT EXISTS` clause was specified.
     pub if_not_exists: bool,
+    /// The comma-separated options.
+    pub options: Vec<ClusterOption>,
 }
 
 impl AstDisplay for CreateClusterStatement {
@@ -829,13 +832,34 @@ impl AstDisplay for CreateClusterStatement {
             f.write_str("IF NOT EXISTS ");
         }
         f.write_node(&self.name);
-
-        if self.if_not_exists {
-            f.write_str("WITH VIRTUAL");
-        };
+        f.write_str(" ");
+        f.write_node(&display::comma_separated(&self.options));
+        f.write_str("");
     }
 }
 impl_display!(CreateClusterStatement);
+
+/// An option in a `CREATE CLUSTER` statement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClusterOption {
+    /// The `VIRTUAL` option.
+    Virtual,
+    /// The `SIZE [[=] 'size']` option.
+    Size(String),
+}
+
+impl AstDisplay for ClusterOption {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        match self {
+            ClusterOption::Virtual => f.write_str("VIRTUAL"),
+            ClusterOption::Size(size) => {
+                f.write_str("SIZE '");
+                f.write_node(&display::escape_single_quote_string(size));
+                f.write_str("'");
+            }
+        }
+    }
+}
 
 /// `CREATE TYPE .. AS <TYPE>`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1103,6 +1127,7 @@ impl<T: AstInfo> AstDisplay for ShowObjectsStatement<T> {
             ObjectType::Sink => "SINKS",
             ObjectType::Type => "TYPES",
             ObjectType::Role => "ROLES",
+            ObjectType::Cluster => "CLUSTERS",
             ObjectType::Object => "OBJECTS",
             ObjectType::Index => unreachable!(),
         });
@@ -1405,6 +1430,7 @@ pub enum ObjectType {
     Index,
     Type,
     Role,
+    Cluster,
     Object,
 }
 
@@ -1419,6 +1445,7 @@ impl AstDisplay for ObjectType {
             ObjectType::Index => "INDEX",
             ObjectType::Type => "TYPE",
             ObjectType::Role => "ROLE",
+            ObjectType::Cluster => "CLUSTER",
             ObjectType::Object => "OBJECT",
         })
     }

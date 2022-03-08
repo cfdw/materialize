@@ -1097,6 +1097,7 @@ where
             ExecuteResponse::DroppedDatabase => command_complete!("DROP DATABASE"),
             ExecuteResponse::DroppedSchema => command_complete!("DROP SCHEMA"),
             ExecuteResponse::DroppedRole => command_complete!("DROP ROLE"),
+            ExecuteResponse::DroppedCluster => command_complete!("DROP CLUSTER"),
             ExecuteResponse::DroppedSource => command_complete!("DROP SOURCE"),
             ExecuteResponse::DroppedIndex => command_complete!("DROP INDEX"),
             ExecuteResponse::DroppedSink => command_complete!("DROP SINK"),

@@ -91,7 +91,7 @@ use uuid::Uuid;
 
 use mz_build_info::BuildInfo;
 use mz_dataflow_types::client::controller::ReadPolicy;
-use mz_dataflow_types::client::{ComputeInstanceId, DEFAULT_COMPUTE_INSTANCE_ID};
+use mz_dataflow_types::client::{ComputeInstanceId, DUMMY_COMPUTE_INSTANCE_ID};
 use mz_dataflow_types::client::{ComputeResponse, TimestampBindingFeedback};
 use mz_dataflow_types::client::{
     CreateSourceCommand, Response as DataflowResponse, StorageResponse,
@@ -127,12 +127,13 @@ use mz_sql::catalog::{CatalogError, CatalogTypeDetails, SessionCatalog as _};
 use mz_sql::names::{DatabaseSpecifier, FullName};
 use mz_sql::plan::{
     AlterIndexEnablePlan, AlterIndexResetOptionsPlan, AlterIndexSetOptionsPlan,
-    AlterItemRenamePlan, CreateClusterPlan, CreateDatabasePlan, CreateIndexPlan, CreateRolePlan,
-    CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan, CreateTablePlan, CreateTypePlan,
-    CreateViewPlan, CreateViewsPlan, DropDatabasePlan, DropItemsPlan, DropRolesPlan,
-    DropSchemaPlan, ExecutePlan, ExplainPlan, FetchPlan, HirRelationExpr, IndexOption,
-    IndexOptionName, InsertPlan, MutationKind, Params, PeekPlan, Plan, QueryWhen, RaisePlan,
-    ReadThenWritePlan, SendDiffsPlan, SetVariablePlan, ShowVariablePlan, TailFrom, TailPlan,
+    AlterItemRenamePlan, CreateComputeInstancePlan, CreateDatabasePlan, CreateIndexPlan,
+    CreateRolePlan, CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan, CreateTablePlan,
+    CreateTypePlan, CreateViewPlan, CreateViewsPlan, DropClustersPlan, DropDatabasePlan,
+    DropItemsPlan, DropRolesPlan, DropSchemaPlan, ExecutePlan, ExplainPlan, FetchPlan,
+    HirRelationExpr, IndexOption, IndexOptionName, InsertPlan, MutationKind, Params, PeekPlan,
+    Plan, QueryWhen, RaisePlan, ReadThenWritePlan, SendDiffsPlan, SetVariablePlan,
+    ShowVariablePlan, TailFrom, TailPlan,
 };
 use mz_sql::plan::{OptimizerConfig, StatementDesc, View};
 use mz_transform::Optimizer;
@@ -253,6 +254,7 @@ pub struct Config {
 struct PendingPeek {
     sender: mpsc::UnboundedSender<PeekResponse>,
     conn_id: u32,
+    compute_instance: ComputeInstanceId,
 }
 
 /// Glues the external world to the Timely workers.
@@ -268,8 +270,8 @@ pub struct Coordinator {
 
     /// Delta from leading edge of an arrangement from which we allow compaction.
     logical_compaction_window_ms: Option<Timestamp>,
-    /// Whether base sources are enabled.
-    logging_enabled: bool,
+    /// Logging configuration for compute instances started by this coordinator.
+    logging: Option<LoggingConfig>,
     /// Channel to manange internal commands from the coordinator to itself.
     internal_cmd_tx: mpsc::UnboundedSender<Message>,
     /// Channel to communicate source status updates to the timestamper thread.
@@ -443,6 +445,13 @@ impl Coordinator {
         &mut self,
         builtin_table_updates: Vec<BuiltinTableUpdate>,
     ) -> Result<(), CoordError> {
+        for instance in self.catalog.compute_instances() {
+            self.dataflow_client
+                .create_instance(instance.id, None)
+                .await
+                .unwrap();
+        }
+
         let entries: Vec<_> = self.catalog.entries().cloned().collect();
 
         // Sources and indexes may be depended upon by other catalog items,
@@ -525,23 +534,21 @@ impl Coordinator {
                     .await;
                 }
                 CatalogItem::Index(idx) => {
-                    // The index is expected to live on some compute instance.
-                    let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
                     if BUILTINS.logs().any(|log| log.id == idx.on) {
                         // TODO: make this one call, not many.
                         self.initialize_compute_read_policies(
                             vec![entry.id()],
-                            compute_instance,
+                            idx.compute_instance,
                             // TODO(benesch): why is this hardcoded to 1000?
                             Some(1000),
                         )
                         .await;
                     } else {
                         let df = self
-                            .dataflow_builder(compute_instance)
+                            .dataflow_builder(idx.compute_instance)
                             .build_index_dataflow(entry.id())?;
                         if let Some(df) = df {
-                            self.ship_dataflow(df, compute_instance).await;
+                            self.ship_dataflow(df, idx.compute_instance).await;
                         }
                     }
                 }
@@ -562,13 +569,11 @@ impl Coordinator {
                     let connector = sink_connector::build(builder.clone(), entry.id())
                         .await
                         .with_context(|| format!("recreating sink {}", entry.name()))?;
-                    // The sink should be established on a specific compute instance.
-                    let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
                     self.handle_sink_connector_ready(
                         entry.id(),
                         entry.oid(),
                         connector,
-                        compute_instance,
+                        sink.compute_instance,
                     )
                     .await?;
                 }
@@ -579,7 +584,7 @@ impl Coordinator {
         self.send_builtin_table_updates(builtin_table_updates).await;
 
         // Announce primary and foreign key relationships.
-        if self.logging_enabled {
+        if self.logging.is_some() {
             for log in BUILTINS.logs() {
                 let log_id = &log.id.to_string();
                 self.send_builtin_table_updates(
@@ -785,16 +790,21 @@ impl Coordinator {
 
     async fn message_worker(&mut self, message: DataflowResponse) {
         match message {
-            DataflowResponse::Compute(ComputeResponse::PeekResponse(uuid, response), _instance) => {
+            DataflowResponse::Compute(ComputeResponse::PeekResponse(uuid, response), instance) => {
                 // We expect exactly one peek response, which we forward. Then we clean up the
                 // peek's state in the coordinator.
                 let PendingPeek {
                     sender: rows_tx,
                     conn_id,
+                    compute_instance,
                 } = self
                     .pending_peeks
                     .remove(&uuid)
                     .expect("no more PeekResponses after closing peek channel");
+                assert_eq!(
+                    instance, compute_instance,
+                    "peek response came from instance we sent it to"
+                );
                 rows_tx
                     .send(response)
                     .expect("Peek endpoint terminated prematurely");
@@ -1476,16 +1486,24 @@ impl Coordinator {
             // Inform the target session (if it asks) about the cancellation.
             let _ = conn_meta.cancel_tx.send(Canceled::Canceled);
 
-            // The peek is present on some specific compute instance.
-            let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
             // Allow dataflow to cancel any pending peeks.
             if let Some(uuids) = self.client_pending_peeks.get(&conn_id) {
-                self.dataflow_client
-                    .compute_mut(compute_instance)
-                    .unwrap()
-                    .cancel_peeks(uuids)
-                    .await
-                    .unwrap();
+                let mut by_compute_instance = HashMap::new();
+                for uuid in uuids {
+                    let peek = &self.pending_peeks[uuid];
+                    by_compute_instance
+                        .entry(peek.compute_instance)
+                        .or_insert(BTreeSet::new())
+                        .insert(*uuid);
+                }
+                for (compute_instance, uuids) in by_compute_instance {
+                    self.dataflow_client
+                        .compute_mut(compute_instance)
+                        .unwrap()
+                        .cancel_peeks(&uuids)
+                        .await
+                        .unwrap();
+                }
             }
         }
     }
@@ -1600,7 +1618,7 @@ impl Coordinator {
                 tx.send(self.sequence_create_role(plan).await, session);
             }
             Plan::CreateCluster(plan) => {
-                tx.send(self.sequence_create_cluster(plan).await, session);
+                tx.send(self.sequence_create_compute_instance(plan).await, session);
             }
             Plan::CreateTable(plan) => {
                 tx.send(self.sequence_create_table(&session, plan).await, session);
@@ -1637,6 +1655,9 @@ impl Coordinator {
             }
             Plan::DropRoles(plan) => {
                 tx.send(self.sequence_drop_roles(plan).await, session);
+            }
+            Plan::DropClusters(plan) => {
+                tx.send(self.sequence_drop_clusters(plan).await, session);
             }
             Plan::DropItems(plan) => {
                 tx.send(self.sequence_drop_items(plan).await, session);
@@ -1901,20 +1922,23 @@ impl Coordinator {
             .map(|_| ExecuteResponse::CreatedRole)
     }
 
-    async fn sequence_create_cluster(
+    async fn sequence_create_compute_instance(
         &mut self,
-        plan: CreateClusterPlan,
+        plan: CreateComputeInstancePlan,
     ) -> Result<ExecuteResponse, CoordError> {
-        let op = catalog::Op::CreateCluster { name: plan.name };
+        let op = catalog::Op::CreateComputeInstance {
+            name: plan.name.clone(),
+        };
         let r = self.catalog_transact(vec![op]).await;
         match r {
             Ok(()) => {
-                let new_instance = self.catalog.get_most_recent_compute_instance().unwrap();
+                let id = self
+                    .catalog
+                    .resolve_compute_instance(&plan.name)
+                    .expect("compute instance must exist after creation")
+                    .id;
                 self.dataflow_client
-                    .create_instance(
-                        new_instance.try_into().expect("no negative instance IDs"),
-                        None,
-                    )
+                    .create_instance(id, None)
                     .await
                     .unwrap();
                 Ok(ExecuteResponse::CreatedCluster { existed: false })
@@ -2012,8 +2036,10 @@ impl Coordinator {
         session: &mut Session,
         plan: CreateSourcePlan,
     ) -> Result<ExecuteResponse, CoordError> {
-        // The dataflow must be built on a specific compute instance.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
 
         let if_not_exists = plan.if_not_exists;
         let (metadata, ops) = self.generate_create_source_ops(session, vec![plan])?;
@@ -2188,11 +2214,6 @@ impl Coordinator {
             with_snapshot,
             if_not_exists,
         } = plan;
-
-        // The dataflow must (eventually) be built on a specific compute instance.
-        // Use this in `catalog_transact` and stash for eventual sink construction.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
-
         // First try to allocate an ID and an OID. If either fails, we're done.
         let id = match self.catalog.allocate_user_id() {
             Ok(id) => id,
@@ -2208,12 +2229,6 @@ impl Coordinator {
                 return;
             }
         };
-
-        let compute_instance_id = self
-            .catalog
-            .resolve_compute_instance(&sink.in_cluster)
-            .unwrap()
-            .id;
 
         // Then try to create a placeholder catalog item with an unknown
         // connector. If that fails, we're done, though if the client specified
@@ -2232,13 +2247,13 @@ impl Coordinator {
                 envelope: sink.envelope,
                 with_snapshot,
                 depends_on: sink.depends_on,
-                compute_instance_id,
+                compute_instance: sink.compute_instance,
             }),
         };
 
         let transact_result = self
             .catalog_transact_dataflow(
-                compute_instance,
+                sink.compute_instance,
                 vec![op],
                 |mut builder| -> Result<(), CoordError> {
                     // Insert a dummy dataflow to trigger validation before we try to actually create
@@ -2296,7 +2311,7 @@ impl Coordinator {
                         id,
                         oid,
                         result: sink_connector::build(connector_builder, id).await,
-                        compute_instance,
+                        compute_instance: sink.compute_instance,
                     }))
                     .expect("sending to internal_cmd_tx cannot fail");
             },
@@ -2389,8 +2404,10 @@ impl Coordinator {
             plan.replace,
             plan.materialize,
         )?;
-        // A materialized view must be created in the context of some instance.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
         match self
             .catalog_transact_dataflow(compute_instance, ops, |mut builder| {
                 if let Some(index_id) = index_id {
@@ -2431,8 +2448,10 @@ impl Coordinator {
                 index_ids.push(index_id);
             }
         }
-        // A materialized view must be created in the context of some instance.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
         match self
             .catalog_transact_dataflow(compute_instance, ops, |mut builder| {
                 let mut dfs = vec![];
@@ -2464,8 +2483,8 @@ impl Coordinator {
             if_not_exists,
         } = plan;
 
-        let compute_instance_id = self.catalog.resolve_compute_instance(&index.in_cluster)?.id;
         let id = self.catalog.allocate_user_id()?;
+        let compute_instance = index.compute_instance;
         let index = catalog::Index {
             create_sql: index.create_sql,
             keys: index.keys,
@@ -2473,7 +2492,7 @@ impl Coordinator {
             conn_id: None,
             depends_on: index.depends_on,
             enabled: self.catalog.index_enabled_by_default(&id),
-            compute_instance_id,
+            compute_instance,
         };
         let oid = self.catalog.allocate_oid()?;
         let op = catalog::Op::CreateItem {
@@ -2482,8 +2501,6 @@ impl Coordinator {
             name,
             item: CatalogItem::Index(index),
         };
-        // An index must be created on a specific compute instance.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
         match self
             .catalog_transact_dataflow(compute_instance, vec![op], |mut builder| {
                 let df = builder.build_index_dataflow(id)?;
@@ -2565,6 +2582,19 @@ impl Coordinator {
         Ok(ExecuteResponse::DroppedRole)
     }
 
+    async fn sequence_drop_clusters(
+        &mut self,
+        plan: DropClustersPlan,
+    ) -> Result<ExecuteResponse, CoordError> {
+        let ops = plan
+            .names
+            .into_iter()
+            .map(|name| catalog::Op::DropComputeInstance { name })
+            .collect();
+        self.catalog_transact(ops).await?;
+        Ok(ExecuteResponse::DroppedCluster)
+    }
+
     async fn sequence_drop_items(
         &mut self,
         plan: DropItemsPlan,
@@ -2579,7 +2609,8 @@ impl Coordinator {
             ObjectType::Sink => ExecuteResponse::DroppedSink,
             ObjectType::Index => ExecuteResponse::DroppedIndex,
             ObjectType::Type => ExecuteResponse::DroppedType,
-            ObjectType::Role => unreachable!("DROP ROLE not supported"),
+            ObjectType::Cluster => unreachable!("DROP CLUSTER has custom plan"),
+            ObjectType::Role => unreachable!("DROP ROLE has custom plan"),
             ObjectType::Object => unreachable!("generic OBJECT cannot be dropped"),
         })
     }
@@ -2619,6 +2650,12 @@ impl Coordinator {
         session: &mut Session,
         plan: SetVariablePlan,
     ) -> Result<ExecuteResponse, CoordError> {
+        if plan.name.eq_ignore_ascii_case("cluster") && !self.catalog.config().experimental_mode {
+            coord_bail!(
+                "setting the \"cluster\" session parameter requires experimental mode; see \
+                https://materialize.com/docs/cli/#experimental-mode"
+            )
+        }
         session
             .vars_mut()
             .set(&plan.name, &plan.value, plan.local)?;
@@ -2843,16 +2880,15 @@ impl Coordinator {
             item_ids.extend(schema.items.values());
         }
 
-        // Gather the compute_instances of all indexes.
-        // TODO: for now we know this is just the default cluster ID.
-        let compute_instances = &[DEFAULT_COMPUTE_INSTANCE_ID];
-
         // Gather the indexes and unmaterialized sources used by those items.
+        //
+        // NOTE: there is surely a more efficient way to do this than to call
+        // sufficient_collections per cluster.
         let mut id_bundle = CollectionIdBundle::default();
-        for compute_instance in compute_instances {
+        for compute_instance in self.catalog.compute_instances() {
             id_bundle.extend(
                 &self
-                    .index_oracle(*compute_instance)
+                    .index_oracle(compute_instance.id)
                     .sufficient_collections(item_ids.iter()),
             );
         }
@@ -2897,10 +2933,11 @@ impl Coordinator {
             copy_to,
         } = plan;
 
-        // The peek must occur on a specific compute instance.
-        // This instance may need to be determined by the subjects of `plan`, or by the currently
-        // set default instance.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        // The peek occurs on the active compute instance.
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
 
         let source_ids = source.depends_on();
         let timeline = self.validate_timeline(source_ids.clone())?;
@@ -3090,8 +3127,10 @@ impl Coordinator {
         } = plan;
 
         // The tail must be installed on a compute instance.
-        // How that instance is determined remains to be seen.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
 
         // TAIL AS OF, similar to peeks, doesn't need to worry about transaction
         // timestamp semantics.
@@ -3151,7 +3190,7 @@ impl Coordinator {
         };
 
         let (sink_id, sink_desc) = &dataflow.sink_exports[0];
-        session.add_drop_sink(*sink_id);
+        session.add_drop_sink(compute_instance, *sink_id);
         let arity = sink_desc.from_desc.arity();
         let (tx, rx) = mpsc::unbounded_channel();
         self.pending_tails
@@ -3407,9 +3446,10 @@ impl Coordinator {
         plan: ExplainPlan,
     ) -> Result<ExecuteResponse, CoordError> {
         // An explain runs in the context of a compute instance, which may have certain indexes.
-        // We should be sure we are explaining the plan as if it were materialized on whatever
-        // instance it would run if invoked.
-        let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let compute_instance = self
+            .catalog
+            .resolve_compute_instance(session.vars().cluster())?
+            .id;
 
         let ExplainPlan {
             raw_plan,
@@ -3920,12 +3960,16 @@ impl Coordinator {
         &mut self,
         plan: AlterIndexEnablePlan,
     ) -> Result<ExecuteResponse, CoordError> {
-        let ops = self.catalog.enable_index_ops(plan.id)?;
-
-        // If ops is not empty, index was disabled.
-        if !ops.is_empty() {
-            // An index lives on a specific compute instance.
-            let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
+        let index = self.catalog.get_by_id(&plan.id).index().unwrap();
+        let compute_instance = index.compute_instance;
+        if !index.enabled {
+            let ops = vec![catalog::Op::UpdateItem {
+                id: plan.id,
+                to_item: CatalogItem::Index(catalog::Index {
+                    enabled: true,
+                    ..index.clone()
+                }),
+            }];
             let df = self
                 .catalog_transact_dataflow(compute_instance, ops, |mut builder| {
                     let df = builder
@@ -3949,7 +3993,7 @@ impl Coordinator {
     /// [`CatalogState`]: crate::catalog::CatalogState
     async fn catalog_transact(&mut self, ops: Vec<catalog::Op>) -> Result<(), CoordError> {
         // The builder is ignored, so we only need a valid compute instance identefier.
-        self.catalog_transact_dataflow(DEFAULT_COMPUTE_INSTANCE_ID, ops, |_builder| Ok(()))
+        self.catalog_transact_dataflow(DUMMY_COMPUTE_INSTANCE_ID, ops, |_builder| Ok(()))
             .await
     }
 
@@ -4003,12 +4047,15 @@ impl Coordinator {
                     }
                     CatalogItem::Sink(catalog::Sink {
                         connector: SinkConnectorState::Ready(_),
+                        compute_instance,
                         ..
                     }) => {
-                        sinks_to_drop.push(*id);
+                        sinks_to_drop.push((*compute_instance, *id));
                     }
-                    CatalogItem::Index(_) => {
-                        indexes_to_drop.push(*id);
+                    CatalogItem::Index(catalog::Index {
+                        compute_instance, ..
+                    }) => {
+                        indexes_to_drop.push((*compute_instance, *id));
                     }
                     _ => (),
                 }
@@ -4057,12 +4104,7 @@ impl Coordinator {
                     .unwrap();
             }
             if !sinks_to_drop.is_empty() {
-                self.dataflow_client
-                    .compute_mut(compute_instance)
-                    .unwrap()
-                    .drop_sinks(sinks_to_drop)
-                    .await
-                    .unwrap();
+                self.drop_sinks(sinks_to_drop).await;
             }
             if !indexes_to_drop.is_empty() {
                 self.drop_indexes(indexes_to_drop).await;
@@ -4149,31 +4191,41 @@ impl Coordinator {
             .await
     }
 
-    async fn drop_sinks(&mut self, dataflow_names: Vec<GlobalId>) {
-        if !dataflow_names.is_empty() {
+    async fn drop_sinks(&mut self, sinks: Vec<(ComputeInstanceId, GlobalId)>) {
+        let mut by_compute_instance = HashMap::new();
+        for (compute_instance, id) in sinks {
+            by_compute_instance
+                .entry(compute_instance)
+                .or_insert(vec![])
+                .push(id);
+        }
+        for (compute_instance, ids) in by_compute_instance {
             self.dataflow_client
-                .compute_mut(DEFAULT_COMPUTE_INSTANCE_ID)
+                .compute_mut(compute_instance)
                 .unwrap()
-                .drop_sinks(dataflow_names)
+                .drop_sinks(ids)
                 .await
                 .unwrap();
         }
     }
 
-    async fn drop_indexes(&mut self, indexes: Vec<GlobalId>) {
-        let mut trace_keys = Vec::new();
-        for id in indexes {
+    async fn drop_indexes(&mut self, indexes: Vec<(ComputeInstanceId, GlobalId)>) {
+        let mut by_compute_instance = HashMap::new();
+        for (compute_instance, id) in indexes {
             if self.read_capability.remove(&id).is_some() {
-                trace_keys.push(id)
+                by_compute_instance
+                    .entry(compute_instance)
+                    .or_insert(vec![])
+                    .push(id);
             } else {
                 tracing::error!("Instructed to drop a non-index index");
             }
         }
-        if !trace_keys.is_empty() {
+        for (compute_instance, ids) in by_compute_instance {
             self.dataflow_client
-                .compute_mut(DEFAULT_COMPUTE_INSTANCE_ID)
+                .compute_mut(compute_instance)
                 .unwrap()
-                .drop_indexes(trace_keys)
+                .drop_sinks(ids)
                 .await
                 .unwrap();
         }
@@ -4197,11 +4249,10 @@ impl Coordinator {
             }
         };
 
+        let index = self.catalog.get_by_id(&id).index().unwrap();
         for o in options {
             match o {
                 IndexOption::LogicalCompactionWindow(window) => {
-                    // The index is on a specific compute instance.
-                    let compute_instance = DEFAULT_COMPUTE_INSTANCE_ID;
                     let window = window.map(duration_to_timestamp_millis);
                     let policy = match window {
                         Some(time) => ReadPolicy::lag_writes_by(time),
@@ -4209,7 +4260,7 @@ impl Coordinator {
                     };
                     needs.base_policy = policy;
                     self.dataflow_client
-                        .compute_mut(compute_instance)
+                        .compute_mut(index.compute_instance)
                         .unwrap()
                         .set_read_policy(vec![(id, needs.policy())])
                         .await;
@@ -4487,7 +4538,7 @@ pub async fn serve(
                 persister,
                 logical_compaction_window_ms: logical_compaction_window
                     .map(duration_to_timestamp_millis),
-                logging_enabled: logging.is_some(),
+                logging,
                 internal_cmd_tx,
                 metric_scraper,
                 global_timeline: timeline::Timeline::new(now()),
@@ -4501,32 +4552,6 @@ pub async fn serve(
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 write_lock_wait_group: VecDeque::new(),
             };
-            let logging = logging.map(|config| DataflowLoggingConfig {
-                granularity_ns: config.granularity.as_nanos(),
-                active_logs: BUILTINS
-                    .logs()
-                    .map(|src| {
-                        (
-                            src.variant.clone(),
-                            // NOTE(benesch): this logic will need to learn to
-                            // find the index for the compute instance we're
-                            // creating.
-                            coord
-                                .catalog
-                                .default_index_for(src.id)
-                                .expect("logging sources must have a default index"),
-                        )
-                    })
-                    .collect(),
-                log_logging: config.log_logging,
-            });
-            handle
-                .block_on(
-                    coord
-                        .dataflow_client
-                        .create_instance(DEFAULT_COMPUTE_INSTANCE_ID, logging),
-                )
-                .unwrap();
             let bootstrap = handle.block_on(coord.bootstrap(builtin_table_updates));
             let ok = bootstrap.is_ok();
             bootstrap_tx.send(bootstrap).unwrap();
@@ -4566,7 +4591,7 @@ fn auto_generate_primary_idx(
     depends_on: Vec<GlobalId>,
     enabled: bool,
     in_cluster: String,
-    compute_instance_id: ComputeInstanceId,
+    compute_instance: ComputeInstanceId,
 ) -> catalog::Index {
     let default_key = on_desc.typ().default_key();
     catalog::Index {
@@ -4579,7 +4604,7 @@ fn auto_generate_primary_idx(
         conn_id,
         depends_on,
         enabled,
-        compute_instance_id,
+        compute_instance,
     }
 }
 
@@ -4962,6 +4987,7 @@ pub mod fast_path_peek {
                 PendingPeek {
                     sender: rows_tx,
                     conn_id,
+                    compute_instance,
                 },
             );
             self.client_pending_peeks
@@ -5011,7 +5037,7 @@ pub mod fast_path_peek {
 
             // If it was created, drop the dataflow once the peek command is sent.
             if let Some(index_id) = drop_dataflow {
-                self.drop_indexes(vec![index_id]).await;
+                self.drop_indexes(vec![(compute_instance, index_id)]).await;
             }
 
             Ok(crate::ExecuteResponse::SendingRows(Box::pin(rows_rx)))
@@ -5174,13 +5200,13 @@ impl Coordinator {
 
         let df = DataflowDesc::new("".into(), GlobalId::Explain);
         let _: () = self
-            .ship_dataflow(df.clone(), DEFAULT_COMPUTE_INSTANCE_ID)
+            .ship_dataflow(df.clone(), DUMMY_COMPUTE_INSTANCE_ID)
             .await;
         let _: () = self
-            .ship_dataflows(vec![df.clone()], DEFAULT_COMPUTE_INSTANCE_ID)
+            .ship_dataflows(vec![df.clone()], DUMMY_COMPUTE_INSTANCE_ID)
             .await;
         let _: DataflowDescription<mz_dataflow_types::plan::Plan> =
-            self.finalize_dataflow(df, DEFAULT_COMPUTE_INSTANCE_ID);
+            self.finalize_dataflow(df, DUMMY_COMPUTE_INSTANCE_ID);
     }
 }
 

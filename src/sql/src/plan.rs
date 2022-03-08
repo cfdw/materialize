@@ -33,6 +33,7 @@ use chrono::{DateTime, Utc};
 use enum_kinds::EnumKind;
 use serde::{Deserialize, Serialize};
 
+use mz_dataflow_types::client::ComputeInstanceId;
 use mz_dataflow_types::{
     sinks::SinkConnectorBuilder, sinks::SinkEnvelope, sources::SourceConnector,
 };
@@ -73,7 +74,7 @@ pub enum Plan {
     CreateDatabase(CreateDatabasePlan),
     CreateSchema(CreateSchemaPlan),
     CreateRole(CreateRolePlan),
-    CreateCluster(CreateClusterPlan),
+    CreateCluster(CreateComputeInstancePlan),
     CreateSource(CreateSourcePlan),
     CreateSink(CreateSinkPlan),
     CreateTable(CreateTablePlan),
@@ -86,6 +87,7 @@ pub enum Plan {
     DropDatabase(DropDatabasePlan),
     DropSchema(DropSchemaPlan),
     DropRoles(DropRolesPlan),
+    DropClusters(DropClustersPlan),
     DropItems(DropItemsPlan),
     EmptyQuery,
     ShowAllVariables,
@@ -140,7 +142,7 @@ pub struct CreateRolePlan {
 }
 
 #[derive(Debug)]
-pub struct CreateClusterPlan {
+pub struct CreateComputeInstancePlan {
     pub name: String,
     pub if_not_exists: bool,
 }
@@ -212,6 +214,11 @@ pub struct DropSchemaPlan {
 
 #[derive(Debug)]
 pub struct DropRolesPlan {
+    pub names: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct DropClustersPlan {
     pub names: Vec<String>,
 }
 
@@ -397,7 +404,7 @@ pub struct Sink {
     pub connector_builder: SinkConnectorBuilder,
     pub envelope: SinkEnvelope,
     pub depends_on: Vec<GlobalId>,
-    pub in_cluster: String,
+    pub compute_instance: ComputeInstanceId,
 }
 
 #[derive(Clone, Debug)]
@@ -415,7 +422,7 @@ pub struct Index {
     pub on: GlobalId,
     pub keys: Vec<mz_expr::MirScalarExpr>,
     pub depends_on: Vec<GlobalId>,
-    pub in_cluster: String,
+    pub compute_instance: ComputeInstanceId,
 }
 
 #[derive(Clone, Debug)]

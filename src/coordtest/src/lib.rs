@@ -515,7 +515,7 @@ pub async fn run_test(mut tf: datadriven::TestFile) -> datadriven::TestFile {
                     }
                     ct.dataflow_client.forward_response(Response::Compute(
                         ComputeResponse::FrontierUppers(updates),
-                        mz_dataflow_types::client::DEFAULT_COMPUTE_INSTANCE_ID,
+                        mz_dataflow_types::client::DUMMY_COMPUTE_INSTANCE_ID,
                     ));
                     "".into()
                 }

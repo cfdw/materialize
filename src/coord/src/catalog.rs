@@ -19,7 +19,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use fail::fail_point;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use mz_dataflow_types::client::{ComputeInstanceId, DEFAULT_COMPUTE_INSTANCE_ID};
+use mz_dataflow_types::client::ComputeInstanceId;
 use mz_dataflow_types::{
     sinks::SinkEnvelope, sources::persistence::EnvelopePersistDesc,
     sources::persistence::SourcePersistDesc, sources::ExternalSourceConnector, sources::MzOffset,
@@ -105,6 +105,7 @@ const SYSTEM_USER: &str = "mz_system";
 pub struct Catalog {
     state: CatalogState,
     storage: Arc<Mutex<storage::Connection>>,
+    enable_logging: bool,
     oid_counter: u32,
     system_index_counter: u64,
     transient_revision: u64,
@@ -117,13 +118,9 @@ pub struct CatalogState {
     by_oid: HashMap<u32, GlobalId>,
     ambient_schemas: BTreeMap<String, Schema>,
     temporary_schemas: HashMap<u32, Schema>,
-
-    // We pass around `ComputeInstanceId`, but not the name, though still need
-    // a means by which to correlate names to an ID, necessitating this
-    // two-level lookup.
-    compute_instances_by_id: HashMap<ComputeInstanceId, ComputeInstance>,
-    compute_instance_names: HashMap<String, ComputeInstanceId>,
     roles: HashMap<String, Role>,
+    compute_instances_by_id: HashMap<ComputeInstanceId, ComputeInstance>,
+    compute_instances_by_name: HashMap<String, ComputeInstanceId>,
     config: mz_sql::catalog::CatalogConfig,
 }
 
@@ -331,7 +328,7 @@ impl CatalogState {
 pub struct ConnCatalog<'a> {
     catalog: &'a Catalog,
     conn_id: u32,
-    cluster: String,
+    compute_instance: String,
     database: String,
     search_path: &'a [&'a str],
     user: String,
@@ -441,7 +438,7 @@ pub struct Sink {
     pub envelope: SinkEnvelope,
     pub with_snapshot: bool,
     pub depends_on: Vec<GlobalId>,
-    pub compute_instance_id: ComputeInstanceId,
+    pub compute_instance: ComputeInstanceId,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -471,7 +468,7 @@ pub struct Index {
     // presently hard to have an `enabled` field in `mz_indexes` if this field
     // does not exist in the catalog.
     pub enabled: bool,
-    pub compute_instance_id: ComputeInstanceId,
+    pub compute_instance: ComputeInstanceId,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,8 +769,9 @@ impl Catalog {
                     disable_user_indexes: config.disable_user_indexes,
                 },
                 compute_instances_by_id: HashMap::new(),
-                compute_instance_names: HashMap::new(),
+                compute_instances_by_name: HashMap::new(),
             },
+            enable_logging: config.enable_logging,
             oid_counter: FIRST_USER_OID,
             system_index_counter: FIRST_SYSTEM_INDEX_ID,
             transient_revision: 0,
@@ -838,10 +836,7 @@ impl Catalog {
         }
 
         let compute_instances = catalog.storage().load_compute_instances()?;
-        // TODO(CREATE+DROP CLUSTER): anything that depends on the default instance must be spun up per-cluster.
-        for (id, name) in compute_instances.into_iter() {
-            let id = id.try_into().expect("no negative compute_instance IDs");
-
+        for (id, name) in compute_instances {
             catalog.state.compute_instances_by_id.insert(
                 id,
                 ComputeInstance {
@@ -849,23 +844,8 @@ impl Catalog {
                     id,
                 },
             );
-
-            catalog
-                .state
-                .compute_instance_names
-                .insert(name.clone(), id);
+            catalog.state.compute_instances_by_name.insert(name, id);
         }
-
-        assert!(
-            catalog.state.compute_instances_by_id[&DEFAULT_COMPUTE_INSTANCE_ID].id
-                == DEFAULT_COMPUTE_INSTANCE_ID
-        );
-
-        // Pretend we don't know what the default instance name is.
-        let default_instance_name = catalog.state.compute_instances_by_id
-            [&DEFAULT_COMPUTE_INSTANCE_ID]
-            .name
-            .clone();
 
         for builtin in BUILTINS.values() {
             let name = FullName {
@@ -875,7 +855,6 @@ impl Catalog {
             };
             match builtin {
                 Builtin::Log(log) if config.enable_logging => {
-                    let index_name = format!("{}_primary_idx", log.name);
                     let oid = catalog.allocate_oid()?;
                     catalog.state.insert_item(
                         log.id,
@@ -889,37 +868,6 @@ impl Catalog {
                             },
                             persist_details: None,
                             desc: log.variant.desc(),
-                        }),
-                    );
-                    let index_id = catalog.allocate_system_index_id()?;
-                    let oid = catalog.allocate_oid()?;
-                    catalog.state.insert_item(
-                        index_id,
-                        oid,
-                        FullName {
-                            database: DatabaseSpecifier::Ambient,
-                            schema: MZ_CATALOG_SCHEMA.into(),
-                            item: index_name.clone(),
-                        },
-                        CatalogItem::Index(Index {
-                            on: log.id,
-                            keys: log
-                                .variant
-                                .index_by()
-                                .into_iter()
-                                .map(MirScalarExpr::Column)
-                                .collect(),
-                            create_sql: super::coord::index_sql(
-                                index_name,
-                                default_instance_name.clone(),
-                                name,
-                                &log.variant.desc(),
-                                &log.variant.index_by(),
-                            ),
-                            conn_id: None,
-                            depends_on: vec![log.id],
-                            enabled: catalog.index_enabled_by_default(&index_id),
-                            compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
                         }),
                     );
                 }
@@ -1002,6 +950,12 @@ impl Catalog {
                 _ => (),
             }
         }
+
+        let compute_instance_ids: Vec<_> = catalog.compute_instances().map(|c| c.id).collect();
+        for compute_instance in compute_instance_ids {
+            catalog.insert_logging_indexes(compute_instance)?;
+        }
+
         if !config.skip_migrations {
             let last_seen_version = catalog.storage().get_catalog_content_version()?;
             crate::catalog::migrate::migrate(&mut catalog).map_err(|e| {
@@ -1052,8 +1006,8 @@ impl Catalog {
         for (role_name, _role) in &catalog.state.roles {
             builtin_table_updates.push(catalog.state.pack_role_update(role_name, 1));
         }
-        for (cluster_name, _id) in &catalog.state.compute_instance_names {
-            builtin_table_updates.push(catalog.state.pack_cluster_update(cluster_name, 1));
+        for (name, _id) in &catalog.state.compute_instances_by_name {
+            builtin_table_updates.push(catalog.state.pack_compute_instance_update(name, 1));
         }
 
         Ok((catalog, builtin_table_updates))
@@ -1148,7 +1102,7 @@ impl Catalog {
         ConnCatalog {
             catalog: self,
             conn_id: session.conn_id(),
-            cluster: session.vars().cluster().into(),
+            compute_instance: session.vars().cluster().into(),
             database: session.vars().database().into(),
             search_path: session.vars().search_path(),
             user: session.user().into(),
@@ -1160,7 +1114,7 @@ impl Catalog {
         ConnCatalog {
             catalog: self,
             conn_id: SYSTEM_CONN_ID,
-            cluster: "materialize".into(),
+            compute_instance: "materialize".into(),
             database: "materialize".into(),
             search_path: &[],
             user,
@@ -1198,6 +1152,54 @@ impl Catalog {
         }
         self.oid_counter += 1;
         Ok(oid)
+    }
+
+    fn insert_logging_indexes(&mut self, compute_instance: ComputeInstanceId) -> Result<(), Error> {
+        if !self.enable_logging {
+            return Ok(());
+        }
+        let compute_instance_name = self.state.compute_instances_by_id[&compute_instance]
+            .name
+            .clone();
+        for log in BUILTINS.logs() {
+            let index_name = format!("{}_{}_primary_idx", log.name, compute_instance_name);
+            let index_id = self.allocate_system_index_id()?;
+            let oid = self.allocate_oid()?;
+            self.state.insert_item(
+                index_id,
+                oid,
+                FullName {
+                    database: DatabaseSpecifier::Ambient,
+                    schema: MZ_CATALOG_SCHEMA.into(),
+                    item: index_name.clone(),
+                },
+                CatalogItem::Index(Index {
+                    on: log.id,
+                    keys: log
+                        .variant
+                        .index_by()
+                        .into_iter()
+                        .map(MirScalarExpr::Column)
+                        .collect(),
+                    create_sql: super::coord::index_sql(
+                        index_name,
+                        compute_instance_name.clone(),
+                        FullName {
+                            database: DatabaseSpecifier::Ambient,
+                            schema: log.schema.into(),
+                            item: log.name.into(),
+                        },
+                        &log.variant.desc(),
+                        &log.variant.index_by(),
+                    ),
+                    conn_id: None,
+                    depends_on: vec![log.id],
+                    enabled: self.index_enabled_by_default(&index_id),
+                    compute_instance,
+                }),
+            );
+        }
+        Ok(())
     }
 
     pub fn resolve_schema(
@@ -1272,7 +1274,7 @@ impl Catalog {
     ) -> Result<&ComputeInstance, SqlCatalogError> {
         let id = self
             .state
-            .compute_instance_names
+            .compute_instances_by_name
             .get(name)
             .ok_or(SqlCatalogError::UnknownComputeInstance(name.to_string()))?;
         Ok(&self.state.compute_instances_by_id[id])
@@ -1478,27 +1480,6 @@ impl Catalog {
         }
     }
 
-    /// Returns the [`Op`]s necessary to enable an index.
-    ///
-    /// # Panics
-    /// Panics if `id` is not the `id` of a [`CatalogItem::Index`].
-    pub fn enable_index_ops(&mut self, id: GlobalId) -> Result<Vec<Op>, Error> {
-        Ok(match &self.get_by_id(&id).item {
-            // no-op
-            CatalogItem::Index(index) if index.enabled => vec![],
-            CatalogItem::Index(index) => {
-                vec![Op::UpdateItem {
-                    id,
-                    to_item: CatalogItem::Index(Index {
-                        enabled: true,
-                        ..index.clone()
-                    }),
-                }]
-            }
-            _ => unreachable!("cannot enable non-indexes"),
-        })
-    }
-
     /// Gets GlobalIds of temporary items to be created, checks for name collisions
     /// within a connection id.
     fn temporary_ids(
@@ -1629,7 +1610,7 @@ impl Catalog {
                 oid: u32,
                 name: String,
             },
-            CreateCluster {
+            CreateComputeInstance {
                 id: ComputeInstanceId,
                 name: String,
             },
@@ -1648,6 +1629,9 @@ impl Catalog {
                 schema_name: String,
             },
             DropRole {
+                name: String,
+            },
+            DropCluster {
                 name: String,
             },
             DropItem(GlobalId),
@@ -1724,17 +1708,14 @@ impl Catalog {
                         name,
                     }]
                 }
-                Op::CreateCluster { name } => {
+                Op::CreateComputeInstance { name } => {
                     if is_reserved_name(&name) {
                         return Err(CoordError::Catalog(Error::new(
                             ErrorKind::ReservedClusterName(name),
                         )));
                     }
-                    vec![Action::CreateCluster {
-                        id: tx
-                            .insert_cluster(&name)?
-                            .try_into()
-                            .expect("no negative cluster IDs"),
+                    vec![Action::CreateComputeInstance {
+                        id: tx.insert_compute_instance(&name)?,
                         name,
                     }]
                 }
@@ -1820,6 +1801,11 @@ impl Catalog {
                     tx.remove_role(&name)?;
                     builtin_table_updates.push(self.state.pack_role_update(&name, -1));
                     vec![Action::DropRole { name }]
+                }
+                Op::DropComputeInstance { name } => {
+                    tx.remove_compute_instance(&name)?;
+                    builtin_table_updates.push(self.state.pack_compute_instance_update(&name, -1));
+                    vec![Action::DropCluster { name }]
                 }
                 Op::DropItem(id) => {
                     let entry = self.get_by_id(&id);
@@ -1976,7 +1962,7 @@ impl Catalog {
                     builtin_table_updates.push(state.pack_role_update(&name, 1));
                 }
 
-                Action::CreateCluster { id, name } => {
+                Action::CreateComputeInstance { id, name } => {
                     info!("create cluster {}", name);
                     state.compute_instances_by_id.insert(
                         id,
@@ -1985,8 +1971,10 @@ impl Catalog {
                             id,
                         },
                     );
-                    state.compute_instance_names.insert(name.clone(), id);
-                    builtin_table_updates.push(state.pack_cluster_update(&name, 1));
+                    state.compute_instances_by_name.insert(name.clone(), id);
+                    // TODO
+                    // catalog.insert_logging_indexes(compute_instance)?;
+                    builtin_table_updates.push(state.pack_compute_instance_update(&name, 1));
                 }
 
                 Action::CreateItem {
@@ -2014,6 +2002,13 @@ impl Catalog {
                 Action::DropRole { name } => {
                     if state.roles.remove(&name).is_some() {
                         info!("drop role {}", name);
+                    }
+                }
+
+                Action::DropCluster { name } => {
+                    if let Some(id) = state.compute_instances_by_name.remove(&name) {
+                        info!("drop cluster {}", name);
+                        state.compute_instances_by_id.remove(&id);
                     }
                 }
 
@@ -2198,8 +2193,7 @@ impl Catalog {
                 conn_id: None,
                 depends_on: index.depends_on,
                 enabled: self.index_enabled_by_default(&id),
-                // TODO: Get instance from plan
-                compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
+                compute_instance: index.compute_instance,
             }),
             Plan::CreateSink(CreateSinkPlan {
                 sink,
@@ -2212,8 +2206,7 @@ impl Catalog {
                 envelope: sink.envelope,
                 with_snapshot,
                 depends_on: sink.depends_on,
-                // TODO: Get instance from plan
-                compute_instance_id: DEFAULT_COMPUTE_INSTANCE_ID,
+                compute_instance: sink.compute_instance,
             }),
             Plan::CreateType(CreateTypePlan { typ, .. }) => CatalogItem::Type(Type {
                 create_sql: typ.create_sql,
@@ -2278,14 +2271,8 @@ impl Catalog {
         self.state.by_id.values()
     }
 
-    pub fn compute_instances(
-        &self,
-    ) -> impl Iterator<Item = (&ComputeInstanceId, &ComputeInstance)> {
-        self.state.compute_instances_by_id.iter()
-    }
-
-    pub fn get_most_recent_compute_instance(&mut self) -> Result<i64, Error> {
-        self.storage().get_most_recent_compute_instance()
+    pub fn compute_instances(&self) -> impl Iterator<Item = &ComputeInstance> {
+        self.state.compute_instances_by_id.values()
     }
 }
 
@@ -2308,7 +2295,7 @@ pub enum Op {
         name: String,
         oid: u32,
     },
-    CreateCluster {
+    CreateComputeInstance {
         name: String,
     },
     CreateItem {
@@ -2325,6 +2312,9 @@ pub enum Op {
         schema_name: String,
     },
     DropRole {
+        name: String,
+    },
+    DropComputeInstance {
         name: String,
     },
     /// Unconditionally removes the identified items. It is required that the
@@ -2533,6 +2523,10 @@ impl SessionCatalog for ConnCatalog<'_> {
         &self.database
     }
 
+    fn active_compute_instance(&self) -> &str {
+        &self.compute_instance
+    }
+
     fn resolve_database(
         &self,
         database_name: &str,
@@ -2581,14 +2575,12 @@ impl SessionCatalog for ConnCatalog<'_> {
             .resolve_function(&self.database, self.search_path, name, self.conn_id)?)
     }
 
-    fn resolve_compute_instance_or_default(
+    fn resolve_compute_instance(
         &self,
         name: Option<&str>,
-    ) -> Result<String, SqlCatalogError> {
-        Ok(match name {
-            None => self.cluster.clone(),
-            Some(name) => self.catalog.resolve_compute_instance(name)?.name.clone(),
-        })
+    ) -> Result<&dyn mz_sql::catalog::CatalogComputeInstance, SqlCatalogError> {
+        let name = name.unwrap_or(&self.compute_instance);
+        Ok(self.catalog.resolve_compute_instance(name)?)
     }
 
     fn try_get_item_by_id(&self, id: &GlobalId) -> Option<&dyn mz_sql::catalog::CatalogItem> {
@@ -2648,6 +2640,16 @@ impl mz_sql::catalog::CatalogSchema for Schema {
 }
 
 impl mz_sql::catalog::CatalogRole for Role {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+}
+
+impl mz_sql::catalog::CatalogComputeInstance for ComputeInstance {
     fn name(&self) -> &str {
         &self.name
     }

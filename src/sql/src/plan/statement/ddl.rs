@@ -56,8 +56,8 @@ use mz_sql_parser::ast::{CreateClusterStatement, CsrSeedCompiledOrLegacy, Source
 
 use crate::ast::display::AstDisplay;
 use crate::ast::{
-    AlterIndexAction, AlterIndexStatement, AlterObjectRenameStatement, AvroSchema, ColumnOption,
-    Compression, CreateDatabaseStatement, CreateIndexStatement, CreateRoleOption,
+    AlterIndexAction, AlterIndexStatement, AlterObjectRenameStatement, AvroSchema, ClusterOption,
+    ColumnOption, Compression, CreateDatabaseStatement, CreateIndexStatement, CreateRoleOption,
     CreateRoleStatement, CreateSchemaStatement, CreateSinkConnector, CreateSinkStatement,
     CreateSourceConnector, CreateSourceFormat, CreateSourceStatement, CreateTableStatement,
     CreateTypeAs, CreateTypeStatement, CreateViewStatement, CreateViewsDefinitions,
@@ -79,11 +79,11 @@ use crate::plan::query::QueryLifetime;
 use crate::plan::statement::{StatementContext, StatementDesc};
 use crate::plan::{
     plan_utils, query, AlterIndexEnablePlan, AlterIndexResetOptionsPlan, AlterIndexSetOptionsPlan,
-    AlterItemRenamePlan, AlterNoopPlan, CreateClusterPlan, CreateDatabasePlan, CreateIndexPlan,
-    CreateRolePlan, CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan, CreateTablePlan,
-    CreateTypePlan, CreateViewPlan, CreateViewsPlan, DropDatabasePlan, DropItemsPlan,
-    DropRolesPlan, DropSchemaPlan, HirRelationExpr, Index, IndexOption, IndexOptionName, Params,
-    Plan, Sink, Source, Table, Type, View,
+    AlterItemRenamePlan, AlterNoopPlan, CreateComputeInstancePlan, CreateDatabasePlan,
+    CreateIndexPlan, CreateRolePlan, CreateSchemaPlan, CreateSinkPlan, CreateSourcePlan,
+    CreateTablePlan, CreateTypePlan, CreateViewPlan, CreateViewsPlan, DropClustersPlan,
+    DropDatabasePlan, DropItemsPlan, DropRolesPlan, DropSchemaPlan, HirRelationExpr, Index,
+    IndexOption, IndexOptionName, Params, Plan, Sink, Source, Table, Type, View,
 };
 use crate::pure::Schema;
 
@@ -1751,10 +1751,9 @@ pub fn describe_create_sink(
 
 pub fn plan_create_sink(
     scx: &StatementContext,
-    mut stmt: CreateSinkStatement<Raw>,
+    stmt: CreateSinkStatement<Raw>,
 ) -> Result<Plan, anyhow::Error> {
-    stmt.in_cluster = Some(Ident::new(scx.resolve_cluster(&stmt.in_cluster)?));
-
+    // TODO: normalize the cluster name to a cluster ID in create_sql.
     let create_sql = normalize::create_statement(scx, Statement::CreateSink(stmt.clone()))?;
     let CreateSinkStatement {
         name,
@@ -1864,6 +1863,8 @@ pub fn plan_create_sink(
         bail!("CREATE SINK ... AS OF is no longer supported");
     }
 
+    let compute_instance = scx.resolve_compute_instance(in_cluster.as_ref())?;
+
     let mut depends_on = vec![from.id()];
     depends_on.extend(from.uses());
 
@@ -1902,7 +1903,7 @@ pub fn plan_create_sink(
             connector_builder,
             envelope,
             depends_on,
-            in_cluster: in_cluster.unwrap().into_string(),
+            compute_instance: compute_instance.id(),
         },
         with_snapshot,
         if_not_exists,
@@ -2005,12 +2006,6 @@ pub fn plan_create_index(
         with_options,
         if_not_exists,
     } = &mut stmt;
-    if let Some(in_cluster) = in_cluster {
-        if in_cluster.as_str() != &scx.resolve_cluster(&None).unwrap() {
-            scx.require_experimental_mode("IN CLUSTER for non-default clusters")?;
-        }
-    }
-
     let on = scx.resolve_item(on_name.clone())?;
 
     if CatalogItemType::View != on.item_type()
@@ -2080,16 +2075,16 @@ pub fn plan_create_index(
     };
 
     let options = plan_index_options(with_options.clone())?;
+    let compute_instance = scx.resolve_compute_instance(in_cluster.as_ref())?;
+    let mut depends_on = vec![on.id()];
+    depends_on.extend(exprs_depend_on);
 
     // Normalize `stmt`.
     *name = Some(Ident::new(index_name.item.clone()));
     *key_parts = Some(filled_key_parts);
     let if_not_exists = *if_not_exists;
-    let in_cluster_pass = scx.resolve_cluster(in_cluster)?;
-    *in_cluster = Some(Ident::new(in_cluster_pass.clone()));
     let create_sql = normalize::create_statement(scx, Statement::CreateIndex(stmt))?;
-    let mut depends_on = vec![on.id()];
-    depends_on.extend(exprs_depend_on);
+    // TODO: normalize the cluster name to a cluster ID in create_sql.
 
     Ok(Plan::CreateIndex(CreateIndexPlan {
         name: index_name,
@@ -2098,7 +2093,7 @@ pub fn plan_create_index(
             on: on.id(),
             keys,
             depends_on,
-            in_cluster: in_cluster_pass,
+            compute_instance: compute_instance.id(),
         },
         options,
         if_not_exists,
@@ -2309,10 +2304,40 @@ pub fn plan_create_cluster(
     CreateClusterStatement {
         name,
         if_not_exists,
+        options,
     }: CreateClusterStatement,
 ) -> Result<Plan, anyhow::Error> {
     scx.require_experimental_mode("CREATE CLUSTER")?;
-    Ok(Plan::CreateCluster(CreateClusterPlan {
+
+    let mut is_virtual = false;
+    let mut size = None;
+
+    for option in options {
+        match option {
+            ClusterOption::Virtual => {
+                if is_virtual {
+                    bail!("VIRTUAL specified more than once");
+                }
+                is_virtual = true;
+            }
+            ClusterOption::Size(s) => {
+                if size.is_some() {
+                    bail!("SIZE specified more than once");
+                }
+                size = Some(s);
+            }
+        }
+    }
+
+    if is_virtual && size.is_some() {
+        bail!("VIRTUAL and SIZE options cannot be specified together");
+    }
+
+    if size.is_some() {
+        bail_unsupported!("SIZE");
+    }
+
+    Ok(Plan::CreateCluster(CreateComputeInstancePlan {
         name: normalize::ident(name),
         if_not_exists,
     }))
@@ -2389,6 +2414,7 @@ pub fn plan_drop_objects(
         | ObjectType::Sink
         | ObjectType::Type => plan_drop_items(scx, object_type, if_exists, names, cascade),
         ObjectType::Role => plan_drop_role(scx, if_exists, names),
+        ObjectType::Cluster => plan_drop_cluster(scx, if_exists, names),
         ObjectType::Object => unreachable!("cannot drop generic OBJECT, must provide object type"),
     }
 }
@@ -2461,6 +2487,33 @@ pub fn plan_drop_role(
         }
     }
     Ok(Plan::DropRoles(DropRolesPlan { names: out }))
+}
+
+pub fn plan_drop_cluster(
+    scx: &StatementContext,
+    if_exists: bool,
+    names: Vec<UnresolvedObjectName>,
+) -> Result<Plan, anyhow::Error> {
+    let mut out = vec![];
+    for name in names {
+        let name = if name.0.len() == 1 {
+            name.0.into_element()
+        } else {
+            bail!("invalid cluster name {}", name.to_string().quoted())
+        };
+        if name.as_str() == scx.catalog.active_compute_instance() {
+            bail!("active cluster cannot be dropped");
+        }
+        match scx.catalog.resolve_compute_instance(Some(name.as_str())) {
+            Ok(_) => out.push(name.into_string()),
+            Err(_) if if_exists => {
+                // TODO(benesch): generate a notice indicating that the
+                // cluster does not exist.
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(Plan::DropClusters(DropClustersPlan { names: out }))
 }
 
 pub fn plan_drop_items(

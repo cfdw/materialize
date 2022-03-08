@@ -2436,32 +2436,21 @@ impl<'a> Parser<'a> {
         self.next_token();
         let if_not_exists = self.parse_if_not_exists()?;
         let name = self.parse_identifier()?;
-
-        let with = self.parse_keyword(WITH);
-
-        let options = if with || self.peek_keyword(VIRTUAL) {
-            self.parse_comma_separated(|parser| {
-                parser.expect_keyword(VIRTUAL)?;
-                Ok(())
-            })?
-        } else {
-            vec![]
-        };
-
-        if options.len() > 1 {
-            // We only have one option; this will need to change when you can
-            // specify e.g. SIZE.
-            return parser_err!(
-                self,
-                self.peek_prev_pos(),
-                "same option specified more than once"
-            );
-        }
-
+        let _ = self.parse_keyword(WITH);
+        let options = self.parse_comma_separated(Parser::parse_cluster_option)?;
         Ok(Statement::CreateCluster(CreateClusterStatement {
             name,
             if_not_exists,
+            options,
         }))
+    }
+
+    fn parse_cluster_option(&mut self) -> Result<ClusterOption, ParserError> {
+        match self.expect_one_of_keywords(&[VIRTUAL, SIZE])? {
+            VIRTUAL => Ok(ClusterOption::Virtual),
+            SIZE => Ok(ClusterOption::Size(self.parse_literal_string()?)),
+            _ => unreachable!(),
+        }
     }
 
     fn parse_if_exists(&mut self) -> Result<bool, ParserError> {
@@ -2521,7 +2510,7 @@ impl<'a> Parser<'a> {
         let materialized = self.parse_keyword(MATERIALIZED);
 
         let object_type = match self.parse_one_of_keywords(&[
-            DATABASE, INDEX, ROLE, SCHEMA, SINK, SOURCE, TABLE, TYPE, USER, VIEW,
+            DATABASE, INDEX, ROLE, CLUSTER, SCHEMA, SINK, SOURCE, TABLE, TYPE, USER, VIEW,
         ]) {
             Some(DATABASE) => {
                 let if_exists = self.parse_if_exists()?;
@@ -2538,6 +2527,7 @@ impl<'a> Parser<'a> {
             }
             Some(INDEX) => ObjectType::Index,
             Some(ROLE) | Some(USER) => ObjectType::Role,
+            Some(CLUSTER) => ObjectType::Cluster,
             Some(SCHEMA) => ObjectType::Schema,
             Some(SINK) => ObjectType::Sink,
             Some(SOURCE) => ObjectType::Source,
@@ -2547,7 +2537,7 @@ impl<'a> Parser<'a> {
             _ => {
                 return self.expected(
                     self.peek_pos(),
-                    "DATABASE, INDEX, ROLE, SCHEMA, SINK, SOURCE, \
+                    "DATABASE, INDEX, ROLE, CLUSTER, SCHEMA, SINK, SOURCE, \
                      TABLE, TYPE, USER, VIEW after DROP",
                     self.peek_token(),
                 );
@@ -3841,12 +3831,13 @@ impl<'a> Parser<'a> {
         if self.parse_one_of_keywords(&[COLUMNS, FIELDS]).is_some() {
             self.parse_show_columns(extended, full)
         } else if let Some(object_type) = self.parse_one_of_keywords(&[
-            OBJECTS, ROLES, SCHEMAS, SINKS, SOURCES, TABLES, TYPES, USERS, VIEWS,
+            OBJECTS, ROLES, CLUSTERS, SCHEMAS, SINKS, SOURCES, TABLES, TYPES, USERS, VIEWS,
         ]) {
             Ok(Statement::ShowObjects(ShowObjectsStatement {
                 object_type: match object_type {
                     OBJECTS => ObjectType::Object,
                     ROLES | USERS => ObjectType::Role,
+                    CLUSTERS => ObjectType::Cluster,
                     SCHEMAS => ObjectType::Schema,
                     SINKS => ObjectType::Sink,
                     SOURCES => ObjectType::Source,

@@ -43,9 +43,10 @@ pub enum Command<T = mz_repr::Timestamp> {
 }
 
 /// An abstraction allowing us to name difference compute instances.
-pub type ComputeInstanceId = usize;
-/// A default value whose use we can track down and remove later.
-pub const DEFAULT_COMPUTE_INSTANCE_ID: ComputeInstanceId = 1;
+pub type ComputeInstanceId = i64;
+
+/// An invalid value for use when an actual compute instance ID is not required.
+pub const DUMMY_COMPUTE_INSTANCE_ID: ComputeInstanceId = 0;
 
 /// Commands related to the computation and maintenance of views.
 #[derive(Clone, Debug, Serialize, Deserialize, EnumKind)]
