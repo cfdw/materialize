@@ -92,7 +92,7 @@ use mz_build_info::BuildInfo;
 use mz_dataflow_types::client::controller::ReadPolicy;
 use mz_dataflow_types::client::{
     ComputeInstanceId, ComputeResponse, CreateSourceCommand, InstanceConfig,
-    Response as DataflowResponse, StorageResponse, TimestampBindingFeedback,
+    Response as DataflowResponse, StorageClient, StorageResponse, TimestampBindingFeedback,
     DEFAULT_COMPUTE_INSTANCE_ID,
 };
 use mz_dataflow_types::sinks::{SinkAsOf, SinkConnector, SinkDesc, TailSinkConnector};
@@ -239,7 +239,7 @@ pub struct LoggingConfig {
 
 /// Configures a coordinator.
 pub struct Config {
-    pub dataflow_client: Box<dyn mz_dataflow_types::client::Client + Send>,
+    pub storage_client: Box<dyn StorageClient + Send>,
     pub dataflow_instance: InstanceConfig,
     pub logging: Option<LoggingConfig>,
     pub storage: storage::Connection,
@@ -262,8 +262,7 @@ struct PendingPeek {
 
 /// State provided to a catalog transaction closure.
 pub struct CatalogTxn<'a, T> {
-    dataflow_client:
-        &'a mz_dataflow_types::client::Controller<Box<dyn mz_dataflow_types::client::Client<T>>>,
+    dataflow_client: &'a mz_dataflow_types::client::Controller<T>,
     catalog: &'a CatalogState,
     persister: &'a PersisterWithConfig,
 }
@@ -271,8 +270,7 @@ pub struct CatalogTxn<'a, T> {
 /// Glues the external world to the Timely workers.
 pub struct Coordinator {
     /// A client to a running dataflow cluster.
-    dataflow_client:
-        mz_dataflow_types::client::Controller<Box<dyn mz_dataflow_types::client::Client>>,
+    dataflow_client: mz_dataflow_types::client::Controller,
     /// Configuration for the global dataflow instance.
     ///
     /// TODO(clusters): make this configurable per cluster, rather than
@@ -4625,7 +4623,7 @@ impl Coordinator {
 /// coordinator.
 pub async fn serve(
     Config {
-        dataflow_client,
+        storage_client,
         dataflow_instance,
         logging,
         storage,
@@ -4677,7 +4675,7 @@ pub async fn serve(
         .name("coordinator".to_string())
         .spawn(move || {
             let mut coord = Coordinator {
-                dataflow_client: mz_dataflow_types::client::Controller::new(dataflow_client),
+                dataflow_client: mz_dataflow_types::client::Controller::new(storage_client),
                 dataflow_instance,
                 view_optimizer: Optimizer::logical_optimizer(),
                 catalog,

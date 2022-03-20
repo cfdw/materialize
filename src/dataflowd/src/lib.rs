@@ -14,6 +14,8 @@
 
 #![deny(missing_docs)]
 
+use std::fmt;
+
 use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -22,18 +24,18 @@ use futures::StreamExt;
 use std::collections::HashMap;
 
 use mz_dataflow_types::client::{
-    partitioned::Partitioned, Client, Command, ComputeCommand, ComputeInstanceId, InstanceConfig,
-    Response,
+    partitioned::Partitioned, Client, Command, ComputeCommand, ComputeInstanceId, GenericClient,
+    InstanceConfig, Response,
 };
 use tracing::{error, trace};
 
 /// A convenience type for compatibility.
 #[derive(Debug)]
-pub struct RemoteClient {
-    client: Partitioned<tcp::TcpClient>,
+pub struct RemoteClient<T> {
+    client: Partitioned<tcp::TcpClient, T>,
 }
 
-impl RemoteClient {
+impl<T> RemoteClient<T> {
     /// Construct a client backed by multiple tcp connections
     pub async fn connect(
         addrs: &[impl tokio::net::ToSocketAddrs + std::fmt::Display],
@@ -53,12 +55,15 @@ impl RemoteClient {
 }
 
 #[async_trait(?Send)]
-impl Client for RemoteClient {
-    async fn send(&mut self, cmd: Command) -> Result<(), anyhow::Error> {
+impl<C, R, T> GenericClient<C, R> for RemoteClient<T>
+where
+    T: fmt::Debug,
+{
+    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
         trace!("Sending dataflow command: {:?}", cmd);
         self.client.send(cmd).await
     }
-    async fn recv(&mut self) -> Option<Response> {
+    async fn recv(&mut self) -> Option<R> {
         let response = self.client.recv().await;
         trace!("Receiving dataflow response: {:?}", response);
         response
@@ -98,7 +103,9 @@ impl<S: Client> Client for SplitClient<S> {
     async fn send(&mut self, cmd: Command) -> Result<(), anyhow::Error> {
         trace!("SplitClient: Sending dataflow command: {:?}", cmd);
         // Ensure that a client exists, if we are asked to create one.
-        if let Command::Compute(ComputeCommand::CreateInstance(config, _logging), instance) = &cmd {
+        if let Command::Compute(ComputeCommand::InitializeInstance(config, _logging), instance) =
+            &cmd
+        {
             if let Some(existing) = self.compute_clients.remove(instance) {
                 error!("Duplicate compute client for instance {instance:?}: current: {existing:?} new: {config:?}");
                 return Err(anyhow!(
@@ -115,11 +122,12 @@ impl<S: Client> Client for SplitClient<S> {
         }
 
         // Notice whether we should drop the instance as a result of the command.
-        let drop_instance = if let Command::Compute(ComputeCommand::DropInstance, instance) = &cmd {
-            Some(*instance)
-        } else {
-            None
-        };
+        let drop_instance =
+            if let Command::Compute(ComputeCommand::DeinitializeInstance, instance) = &cmd {
+                Some(*instance)
+            } else {
+                None
+            };
 
         // Route the command appropriately
         match cmd {
@@ -171,7 +179,7 @@ pub mod tcp {
     use tokio_serde::formats::Bincode;
     use tokio_util::codec::LengthDelimitedCodec;
 
-    use mz_dataflow_types::client::{Client, Command, Response};
+    use mz_dataflow_types::client::{Client, Command, GenericClient, Response};
 
     /// A client to a remote dataflow server.
     #[derive(Debug)]
@@ -188,13 +196,13 @@ pub mod tcp {
     }
 
     #[async_trait(?Send)]
-    impl Client for TcpClient {
-        async fn send(&mut self, cmd: Command) -> Result<(), anyhow::Error> {
+    impl<T> GenericClient<Command<T>, Response<T>> for TcpClient {
+        async fn send(&mut self, cmd: Command<T>) -> Result<(), anyhow::Error> {
             // TODO: something better than panicking.
             self.connection.send(cmd).await.map_err(|err| err.into())
         }
 
-        async fn recv(&mut self) -> Option<Response> {
+        async fn recv(&mut self) -> Option<Response<T>> {
             // TODO: something better than panicking.
             self.connection
                 .next()
