@@ -1,0 +1,74 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
+syntax = "proto3";
+
+package mz_storage2.service;
+
+import "repr/src/proto/global_id.proto";
+
+// The definition of the storage service.
+//
+// A storage service manages the ingestion of any number of sources.
+// In the future, the storage service will also manage tables and sinks.
+service Storage {
+  rpc Control (stream StorageCommand) returns (stream StorageResponse) {}
+}
+
+/// A command sent to a storage server.
+message StorageCommand {
+  oneof kind {
+    CreateSourceCommand create_source = 1;
+    AllowCompactionCommand allow_compaction = 2;
+  }
+}
+
+// Creates a new source.
+message CreateSourceCommand {
+    // The ID of the source.
+    global_id.ProtoGlobalId id = 1;
+    // The description of the source.
+    SourceDesc desc = 2;
+    // The initial since frontier for the source.
+    TimestampAntichain since = 3;
+}
+
+/// Describes a source.
+message SourceDesc {
+
+}
+
+// Advances the since frontier for a source.
+message AllowCompactionCommand {
+    // The ID of the source.
+    global_id.ProtoGlobalId global_id = 1;
+    // The since frontier to advance to.
+    //
+    // The frontier must be greater than or equal to the existing frontier.
+    uint64 frontier = 2;
+}
+
+// A response sent to a storage client.
+message StorageResponse {
+  oneof kind {
+    UpperFrontierResponse upper_frontier = 1;
+  }
+}
+
+// Indicates that a source's upper frontier has advanced.
+message UpperFrontierResponse {
+    // The ID of the source whose frontier has advanced.
+    global_id.ProtoGlobalId id = 1;
+    // The new upper frontier.
+    TimestampAntichain upper = 2;
+}
+
+message TimestampAntichain {
+    repeated uint64 element = 1;
+}

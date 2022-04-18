@@ -4190,6 +4190,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mz-storage2"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "futures",
+ "mz-ore",
+ "mz-persist-client",
+ "mz-repr",
+ "prost",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mz-test-util"
 version = "0.0.0"
 dependencies = [

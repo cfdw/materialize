@@ -1,0 +1,25 @@
+[package]
+name = "mz-storage2"
+description = "Materialize's storage layer, v2."
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.60.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0.56"
+async-stream = "0.3.3"
+async-trait = "0.1.53"
+clap = { version = "3.1.8", features = ["derive", "env"] }
+futures = "0.3.21"
+mz-ore = { path = "../ore", features = ["task"] }
+mz-persist-client = { path = "../persist-client" }
+mz-repr = { path = "../repr" }
+prost = "0.10.1"
+tracing = "0.1.33"
+tracing-subscriber = "0.3.11"
+tokio = { version = "1.17.0", features = ["fs", "rt", "sync"] }
+tonic = "0.7.1"
+
+[build-dependencies]
+tonic-build = "0.7.0"
