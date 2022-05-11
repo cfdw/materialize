@@ -59,7 +59,7 @@ pub struct ComputeCommandReconcile<T, C> {
     uppers: HashMap<GlobalId, MutableAntichain<T>>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T, C> GenericClient<ComputeCommand<T>, ComputeResponse<T>> for ComputeCommandReconcile<T, C>
 where
     C: ComputeClient<T>,

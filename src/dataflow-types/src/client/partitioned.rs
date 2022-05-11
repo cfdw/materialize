@@ -63,13 +63,13 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<P, C, R> GenericClient<C, R> for Partitioned<P, C, R>
 where
     P: GenericClient<C, R>,
     (C, R): Partitionable<C, R>,
-    C: fmt::Debug + Send,
-    R: fmt::Debug + Send,
+    C: fmt::Debug,
+    R: fmt::Debug,
 {
     async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
         let cmd_parts = self.state.split_command(cmd);

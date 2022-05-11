@@ -123,7 +123,7 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl<C: ComputeClient<T>, T> GenericClient<ComputeCommand<T>, ComputeResponse<T>>
     for ActiveReplication<C, T>
 where

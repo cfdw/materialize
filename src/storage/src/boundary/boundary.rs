@@ -162,7 +162,7 @@ mod boundary_hook {
         }
     }
 
-    #[async_trait]
+    #[async_trait(?Send)]
     impl<C, T> GenericClient<StorageCommand<T>, StorageResponse<T>> for BoundaryHook<C, T>
     where
         C: GenericClient<StorageCommand<T>, StorageResponse<T>>,

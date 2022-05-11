@@ -473,7 +473,7 @@ pub enum StorageResponse<T = mz_repr::Timestamp> {
 }
 
 /// A client to a running dataflow server.
-#[async_trait]
+#[async_trait(?Send)]
 pub trait GenericClient<C, R>: fmt::Debug + Send {
     /// Sends a command to the dataflow server.
     ///
@@ -492,9 +492,9 @@ pub trait GenericClient<C, R>: fmt::Debug + Send {
     /// calls to `recv`.
     fn as_stream<'a>(
         &'a mut self,
-    ) -> Pin<Box<dyn Stream<Item = Result<R, anyhow::Error>> + Send + 'a>>
+    ) -> Pin<Box<dyn Stream<Item = Result<R, anyhow::Error>> + 'a>>
     where
-        R: Send + 'a,
+        R: 'a,
     {
         Box::pin(async_stream::stream! {
             loop {
@@ -524,7 +524,7 @@ pub trait ComputeClient<T = mz_repr::Timestamp>:
 
 impl<C, T> ComputeClient<T> for C where C: GenericClient<ComputeCommand<T>, ComputeResponse<T>> {}
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<C, R> GenericClient<C, R> for Box<dyn GenericClient<C, R>>
 where
     C: Send,
@@ -537,7 +537,7 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T: Send> GenericClient<ComputeCommand<T>, ComputeResponse<T>> for Box<dyn ComputeClient<T>> {
     async fn send(&mut self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
@@ -547,7 +547,7 @@ impl<T: Send> GenericClient<ComputeCommand<T>, ComputeResponse<T>> for Box<dyn C
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T: Send> GenericClient<StorageCommand<T>, StorageResponse<T>> for Box<dyn StorageClient<T>> {
     async fn send(&mut self, cmd: StorageCommand<T>) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
@@ -592,7 +592,7 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<C, R> GenericClient<C, R> for LocalClient<C, R>
 where
     (C, R): partitioned::Partitionable<C, R>,
@@ -653,7 +653,7 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<C, R> GenericClient<C, R> for RemoteClient<C, R>
 where
     (C, R): partitioned::Partitionable<C, R>,
@@ -687,7 +687,7 @@ pub mod process_local {
         worker_thread: std::thread::Thread,
     }
 
-    #[async_trait]
+    #[async_trait(?Send)]
     impl<C, R> GenericClient<C, R> for ProcessLocal<C, R>
     where
         C: fmt::Debug + Send,
@@ -836,7 +836,7 @@ pub mod tcp {
         }
     }
 
-    #[async_trait]
+    #[async_trait(?Send)]
     impl<C, R> GenericClient<C, R> for TcpClient<C, R>
     where
         C: Serialize + fmt::Debug + Send + Unpin,

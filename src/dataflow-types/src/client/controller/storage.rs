@@ -58,7 +58,7 @@ include!(concat!(
     "/mz_dataflow_types.client.controller.storage.rs"
 ));
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait StorageController: Debug + Send {
     type Timestamp;
 
@@ -280,7 +280,7 @@ impl<T> StorageControllerState<T> {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T> StorageController for Controller<T>
 where
     T: Timestamp + Lattice + TotalOrder + TryInto<i64> + TryFrom<i64> + Codec64,
