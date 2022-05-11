@@ -71,7 +71,7 @@ where
     C: fmt::Debug,
     R: fmt::Debug,
 {
-    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
         let cmd_parts = self.state.split_command(cmd);
         for (shard, cmd_part) in self.parts.iter_mut().zip(cmd_parts) {
             shard.send(cmd_part).await?;
@@ -79,7 +79,7 @@ where
         Ok(())
     }
 
-    async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
         let parts = self.parts.len();
         let mut stream: StreamMap<_, _> = self
             .parts

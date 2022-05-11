@@ -129,7 +129,7 @@ impl<C: ComputeClient<T>, T> GenericClient<ComputeCommand<T>, ComputeResponse<T>
 where
     T: timely::progress::Timestamp + differential_dataflow::lattice::Lattice + std::fmt::Debug,
 {
-    async fn send(&mut self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
         // Register an interest in the peek.
         if let ComputeCommand::Peek(Peek { uuid, .. }) = &cmd {
             self.peeks.insert(*uuid);
@@ -184,7 +184,7 @@ where
         Ok(())
     }
 
-    async fn recv(&mut self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
         if self.replicas.is_empty() {
             // We want to communicate that the result is not ready
             futures::future::pending().await

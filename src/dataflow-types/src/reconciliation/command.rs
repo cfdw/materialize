@@ -65,11 +65,11 @@ where
     C: ComputeClient<T>,
     T: timely::progress::Timestamp + Copy,
 {
-    async fn send(&mut self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
         self.absorb_command(cmd).await
     }
 
-    async fn recv(&mut self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
         if let Some(response) = self.responses.pop_front() {
             Ok(Some(response))
         } else {

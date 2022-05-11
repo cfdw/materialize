@@ -19,7 +19,6 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
-use mz_repr::proto::{ProtoRepr, TryFromProtoError, TryIntoIfSome};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use serde::de::DeserializeOwned;
@@ -30,7 +29,7 @@ use tracing::trace;
 use uuid::Uuid;
 
 use mz_expr::{PartitionId, RowSetFinishing};
-use mz_repr::proto::any_uuid;
+use mz_repr::proto::{any_uuid, ProtoRepr, TryFromProtoError, TryIntoIfSome};
 use mz_repr::{GlobalId, Row};
 
 use crate::logging::LoggingConfig;
@@ -478,13 +477,13 @@ pub trait GenericClient<C, R>: fmt::Debug + Send {
     /// Sends a command to the dataflow server.
     ///
     /// The command can error for various reasons.
-    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error>;
+    async fn send(&self, cmd: C) -> Result<(), anyhow::Error>;
 
     /// Receives the next response from the dataflow server.
     ///
     /// This method blocks until the next response is available, or, if the
     /// dataflow server has been shut down, returns `None`.
-    async fn recv(&mut self) -> Result<Option<R>, anyhow::Error>;
+    async fn recv(&self) -> Result<Option<R>, anyhow::Error>;
 
     /// Returns an adapter that treats the client as a stream.
     ///
@@ -529,30 +528,30 @@ impl<C, R> GenericClient<C, R> for Box<dyn GenericClient<C, R>>
 where
     C: Send,
 {
-    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
     }
-    async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
         (**self).recv().await
     }
 }
 
 #[async_trait(?Send)]
 impl<T: Send> GenericClient<ComputeCommand<T>, ComputeResponse<T>> for Box<dyn ComputeClient<T>> {
-    async fn send(&mut self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
     }
-    async fn recv(&mut self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
         (**self).recv().await
     }
 }
 
 #[async_trait(?Send)]
 impl<T: Send> GenericClient<StorageCommand<T>, StorageResponse<T>> for Box<dyn StorageClient<T>> {
-    async fn send(&mut self, cmd: StorageCommand<T>) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: StorageCommand<T>) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
     }
-    async fn recv(&mut self) -> Result<Option<StorageResponse<T>>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<StorageResponse<T>>, anyhow::Error> {
         (**self).recv().await
     }
 }
@@ -599,11 +598,11 @@ where
     C: fmt::Debug + Send,
     R: fmt::Debug + Send,
 {
-    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
         trace!("SEND dataflow command: {:?}", cmd);
         self.client.send(cmd).await
     }
-    async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
         let response = self.client.recv().await;
         trace!("RECV dataflow response: {:?}", response);
         response
@@ -660,11 +659,11 @@ where
     C: Serialize + fmt::Debug + Unpin + Send,
     R: DeserializeOwned + fmt::Debug + Unpin + Send,
 {
-    async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
+    async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
         trace!("Sending dataflow command: {:?}", cmd);
         self.client.send(cmd).await
     }
-    async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
+    async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
         let response = self.client.recv().await;
         trace!("Receiving dataflow response: {:?}", response);
         response
@@ -693,7 +692,7 @@ pub mod process_local {
         C: fmt::Debug + Send,
         R: fmt::Debug + Send,
     {
-        async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
+        async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
             self.worker_tx
                 .send(cmd)
                 .expect("worker command receiver should not drop first");
@@ -701,7 +700,7 @@ pub mod process_local {
             Ok(())
         }
 
-        async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
+        async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
             Ok(self.feedback_rx.recv().await)
         }
     }
@@ -735,38 +734,24 @@ pub mod process_local {
 
 /// A client to a remote dataflow server.
 pub mod tcp {
-    use std::cmp;
     use std::fmt;
-    use std::future::Future;
-    use std::pin::Pin;
     use std::time::Duration;
+    use std::cell::RefCell;
 
     use async_trait::async_trait;
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
     use serde::de::DeserializeOwned;
     use serde::ser::Serialize;
-    use tokio::io::{self, AsyncRead, AsyncWrite};
+    use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::net::TcpStream;
-    use tokio::time::{self, Instant};
     use tokio_serde::formats::Bincode;
     use tokio_util::codec::LengthDelimitedCodec;
     use tracing::error;
 
+    use mz_ore::retry::Retry;
+
     use crate::client::GenericClient;
-
-    enum TcpConn<C, R> {
-        Disconnected,
-        Connecting(Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>),
-        Backoff(Instant),
-        Connected(FramedClient<TcpStream, C, R>),
-    }
-
-    impl<C, R> fmt::Debug for TcpConn<C, R> {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("TcpConn")
-        }
-    }
 
     /// A client to a remote dataflow server.
     ///
@@ -776,8 +761,7 @@ pub mod tcp {
     /// a `select` style construct to avoid suspending their task by a call to `recv()`.
     #[derive(Debug)]
     pub struct TcpClient<C, R> {
-        connection: TcpConn<C, R>,
-        backoff: Duration,
+        connection: RefCell<Option<FramedClient<TcpStream, C, R>>>,
         addr: String,
     }
 
@@ -787,52 +771,40 @@ pub mod tcp {
         /// Use the `connect()` method to put the client into a connected state.
         pub fn new(addr: String) -> TcpClient<C, R> {
             Self {
-                connection: TcpConn::Disconnected,
-                backoff: Duration::from_millis(10),
+                connection: RefCell::new(None),
                 addr,
             }
         }
 
         /// Reports whether the client is actively connected.
         pub fn connected(&self) -> bool {
-            matches!(self.connection, TcpConn::Connected(_))
+            self.connection.borrow().is_some()
         }
 
         /// Connects the underlying `connection`.
-        pub async fn connect(&mut self) {
-            // This is written in state-machine style to be cancellation safe.
-            loop {
-                match &mut self.connection {
-                    TcpConn::Disconnected => {
-                        let connecting = Box::pin(TcpStream::connect(self.addr.clone()));
-                        self.connection = TcpConn::Connecting(connecting);
-                    }
-                    TcpConn::Connecting(connecting) => match connecting.await {
-                        Ok(connection) => {
-                            tracing::info!("Reconnected to {}", self.addr);
-                            self.connection = TcpConn::Connected(framed_client(connection));
+        pub async fn connect(&self) {
+            let conn = Retry::default()
+                .clamp_backoff(Duration::from_secs(1))
+                .retry_async(|state| {
+                    let addr = &self.addr;
+                    async move {
+                        match TcpStream::connect(addr).await {
+                            Ok(connection) => Ok(framed_client(connection)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Error connecting to {}: {e}; reconnecting in {:?}",
+                                    addr,
+                                    state.next_backoff,
+                                );
+                                Err(e)
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Error connecting to {}: {e}; reconnecting in {:?}",
-                                self.addr,
-                                self.backoff,
-                            );
-                            let deadline = Instant::now() + self.backoff;
-                            self.backoff = cmp::min(self.backoff * 2, Duration::from_secs(1));
-                            self.connection = TcpConn::Backoff(deadline);
-                        }
-                    },
-                    TcpConn::Backoff(deadline) => {
-                        time::sleep_until(*deadline).await;
-                        self.connection = TcpConn::Disconnected;
                     }
-                    TcpConn::Connected(_) => {
-                        self.backoff = Duration::from_millis(10);
-                        break;
-                    }
-                }
-            }
+                })
+                .await
+                .expect("retries infinitely");
+            tracing::info!("Reconnected to {}", self.addr);
+            *self.connection.borrow_mut() = Some(conn);
         }
     }
 
@@ -842,11 +814,12 @@ pub mod tcp {
         C: Serialize + fmt::Debug + Send + Unpin,
         R: DeserializeOwned + fmt::Debug + Send + Unpin,
     {
-        async fn send(&mut self, cmd: C) -> Result<(), anyhow::Error> {
-            if let TcpConn::Connected(connection) = &mut self.connection {
+        async fn send(&self, cmd: C) -> Result<(), anyhow::Error> {
+            if let Some(connection) = *self.connection.borrow() {
                 let result = connection.send(cmd).await;
                 if result.is_err() {
-                    self.connection = TcpConn::Disconnected;
+                    drop(connection);
+                    *self.connection.borrow_mut() = None;
                 }
                 Ok(result?)
             } else {
@@ -854,8 +827,8 @@ pub mod tcp {
             }
         }
 
-        async fn recv(&mut self) -> Result<Option<R>, anyhow::Error> {
-            if let TcpConn::Connected(connection) = &mut self.connection {
+        async fn recv(&self) -> Result<Option<R>, anyhow::Error> {
+            if let Some(connection) = *self.connection.borrow() {
                 match connection.next().await {
                     Some(Ok(response)) => Ok(Some(response)),
                     other => {
@@ -864,7 +837,7 @@ pub mod tcp {
                             None => error!("connection unexpectedly terminated cleanly"),
                             Some(Err(e)) => error!("connection unexpectedly errored: {}", e),
                         }
-                        self.connection = TcpConn::Disconnected;
+                        drop(connection);
                         self.connect().await;
                         Err(anyhow::anyhow!("Connection severed; reconnected"))
                     }
