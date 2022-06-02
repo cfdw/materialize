@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0.
 
 use std::path::Path;
+use std::time::Duration;
 
 use itertools::Itertools;
 use rusqlite::params;
@@ -170,6 +171,7 @@ pub struct Connection {
 impl Connection {
     pub fn open(path: &Path, experimental_mode: Option<bool>) -> Result<Connection, Error> {
         let mut sqlite = rusqlite::Connection::open(path)?;
+        sqlite.busy_timeout(Duration::from_secs(60))?;
 
         // Validate application ID.
         let tx = sqlite.transaction()?;
