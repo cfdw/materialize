@@ -99,8 +99,7 @@ impl SourceReader for KafkaSourceReader {
             _ => unreachable!(),
         };
         let KafkaSourceConnection {
-            addrs,
-            config_options,
+            connection,
             topic,
             group_id_prefix,
             cluster_id,
@@ -108,10 +107,10 @@ impl SourceReader for KafkaSourceReader {
         } = kc;
         let kafka_config = create_kafka_config(
             &source_name,
-            &addrs,
+            &connection.broker,
             group_id_prefix,
             cluster_id,
-            &config_options,
+            &connection.options,
             connection_context.librdkafka_log_level,
         );
         let (stats_tx, stats_rx) = crossbeam_channel::unbounded();
@@ -153,7 +152,8 @@ impl SourceReader for KafkaSourceReader {
             let partition_info = Arc::downgrade(&partition_info);
             let topic = topic.clone();
             let consumer = Arc::clone(&consumer);
-            let metadata_refresh_frequency = config_options
+            let metadata_refresh_frequency = connection
+                .options
                 .get("topic.metadata.refresh.interval.ms")
                 // Safe conversion: statement::extract_config enforces that option is a value
                 // between 0 and 3600000

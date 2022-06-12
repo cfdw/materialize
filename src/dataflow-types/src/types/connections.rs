@@ -11,9 +11,11 @@
 
 use std::collections::BTreeMap;
 
+use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize};
 
 use mz_kafka_util::KafkaAddrs;
+use mz_repr::proto::{IntoRustIfSome, RustType, TryFromProtoError};
 use mz_repr::GlobalId;
 use mz_secrets::SecretsReader;
 
@@ -21,18 +23,46 @@ use crate::types::connections::aws::AwsExternalIdPrefix;
 
 pub mod aws;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+include!(concat!(
+    env!("OUT_DIR"),
+    "/mz_dataflow_types.types.connections.rs"
+));
+
+#[derive(Arbitrary, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum StringOrSecret {
     String(String),
     Secret(GlobalId),
 }
 
 impl StringOrSecret {
-    pub fn get_string(&self, secrets_reader: &SecretsReader) -> anyhow::Result<String> {
+    pub async fn get_string(&self, secrets_reader: &dyn SecretsReader) -> Result<String, anyhow::Error> {
         match self {
             StringOrSecret::String(s) => Ok(s.clone()),
-            StringOrSecret::Secret(id) => secrets_reader.read_string(*id),
+            StringOrSecret::Secret(id) => secrets_reader.read_string(*id).await,
         }
+    }
+}
+
+impl RustType<ProtoStringOrSecret> for StringOrSecret {
+    fn into_proto(&self) -> ProtoStringOrSecret {
+        use proto_string_or_secret::Kind;
+        ProtoStringOrSecret {
+            kind: Some(match self {
+                StringOrSecret::String(s) => Kind::String(s.clone()),
+                StringOrSecret::Secret(id) => Kind::Secret(id.into_proto()),
+            }),
+        }
+    }
+
+    fn from_proto(proto: ProtoStringOrSecret) -> Result<Self, TryFromProtoError> {
+        use proto_string_or_secret::Kind;
+        let kind = proto
+            .kind
+            .ok_or_else(|| TryFromProtoError::missing_field("ProtoStringOrSecret::kind"))?;
+        Ok(match kind {
+            Kind::String(s) => StringOrSecret::String(s),
+            Kind::Secret(id) => StringOrSecret::Secret(GlobalId::from_proto(id)?),
+        })
     }
 }
 
@@ -82,8 +112,34 @@ pub enum Connection {
     Csr(mz_ccsr::ClientConfig),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Arbitrary, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct KafkaConnection {
     pub broker: KafkaAddrs,
     pub options: BTreeMap<String, StringOrSecret>,
+}
+
+impl RustType<ProtoKafkaConnection> for KafkaConnection {
+    fn into_proto(&self) -> ProtoKafkaConnection {
+        ProtoKafkaConnection {
+            broker: Some(self.broker.into_proto()),
+            options: self
+                .options
+                .iter()
+                .map(|(k, v)| (k.clone(), v.into_proto()))
+                .collect(),
+        }
+    }
+
+    fn from_proto(proto: ProtoKafkaConnection) -> Result<Self, TryFromProtoError> {
+        Ok(KafkaConnection {
+            broker: proto
+                .broker
+                .into_rust_if_some("ProtoKafkaConnection::broker")?,
+            options: proto
+                .options
+                .into_iter()
+                .map(|(k, v)| Ok((k, StringOrSecret::from_proto(v)?)))
+                .collect::<Result<_, TryFromProtoError>>()?,
+        })
+    }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "mz-kubernetes-util"
+description = "Kubernetes utilities."
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.61.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0.57"
+kube = { version = "0.73.1", features = ["ws"] }

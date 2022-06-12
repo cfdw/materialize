@@ -12,7 +12,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::Utc;
 use clap::ArgEnum;
@@ -20,13 +20,12 @@ use futures::stream::{BoxStream, StreamExt};
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, Pod, PodSpec, PodTemplateSpec, ResourceRequirements,
-    SecretVolumeSource, Service as K8sService, ServicePort, ServiceSpec, Volume, VolumeMount,
+    Service as K8sService, ServicePort, ServiceSpec,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams};
 use kube::client::Client;
-use kube::config::{Config, KubeConfigOptions};
 use kube::error::Error;
 use kube::runtime::{watcher, WatchStreamExt};
 use kube::ResourceExt;
@@ -36,8 +35,6 @@ use mz_orchestrator::{
     NamespacedOrchestrator, Orchestrator, Service, ServiceAssignments, ServiceConfig, ServiceEvent,
     ServiceStatus,
 };
-
-const FIELD_MANAGER: &str = "materialized";
 
 /// Configures a [`KubernetesOrchestrator`].
 #[derive(Debug, Clone)]
@@ -53,8 +50,9 @@ pub struct KubernetesOrchestratorConfig {
     pub service_account: Option<String>,
     /// The image pull policy to set for services created by the orchestrator.
     pub image_pull_policy: KubernetesImagePullPolicy,
-    /// The name of the secret used to store user defined secrets.
-    pub user_defined_secret: String,
+    /// The field manager to present as when interacting with the Kubernetes
+    /// API.
+    pub field_manager: String,
 }
 
 /// Specifies whether Kubernetes should pull Docker images when creating pods.
@@ -96,21 +94,8 @@ impl KubernetesOrchestrator {
     pub async fn new(
         config: KubernetesOrchestratorConfig,
     ) -> Result<KubernetesOrchestrator, anyhow::Error> {
-        let kubeconfig_options = KubeConfigOptions {
-            context: Some(config.context.clone()),
-            ..Default::default()
-        };
-        let kubeconfig = match Config::from_kubeconfig(&kubeconfig_options).await {
-            Ok(config) => config,
-            Err(kubeconfig_err) => match Config::from_cluster_env() {
-                Ok(config) => config,
-                Err(in_cluster_err) => {
-                    bail!("failed to infer config: in-cluster: ({in_cluster_err}), kubeconfig: ({kubeconfig_err})");
-                }
-            },
-        };
-        let kubernetes_namespace = kubeconfig.default_namespace.clone();
-        let client = Client::try_from(kubeconfig)?;
+        let (client, kubernetes_namespace) =
+            mz_kubernetes_util::create_client(config.context.clone()).await?;
         Ok(KubernetesOrchestrator {
             client,
             kubernetes_namespace,
@@ -241,17 +226,6 @@ impl NamespacedOrchestrator for NamespacedKubernetesOrchestrator {
             status: None,
         };
 
-        let volume_name = "secrets-mount".to_string();
-
-        let secrets_volume = Volume {
-            name: volume_name.clone(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(self.config.user_defined_secret.clone()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
         let hosts = (0..scale.get())
             .map(|i| {
                 format!(
@@ -312,14 +286,8 @@ impl NamespacedOrchestrator for NamespacedKubernetesOrchestrator {
                         limits: Some(limits),
                         ..Default::default()
                     }),
-                    volume_mounts: Some(vec![VolumeMount {
-                        mount_path: "/secrets".to_string(),
-                        name: volume_name.clone(),
-                        ..Default::default()
-                    }]),
                     ..Default::default()
                 }],
-                volumes: Some(vec![secrets_volume]),
                 node_selector: Some(node_selector),
                 service_account: self.config.service_account.clone(),
                 ..Default::default()
@@ -363,14 +331,14 @@ impl NamespacedOrchestrator for NamespacedKubernetesOrchestrator {
         self.service_api
             .patch(
                 &name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
+                &PatchParams::apply(&self.config.field_manager).force(),
                 &Patch::Apply(service),
             )
             .await?;
         self.stateful_set_api
             .patch(
                 &name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
+                &PatchParams::apply(&self.config.field_manager).force(),
                 &Patch::Apply(stateful_set),
             )
             .await?;

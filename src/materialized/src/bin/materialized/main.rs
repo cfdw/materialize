@@ -155,20 +155,6 @@ pub struct Args {
     /// production cluster that happens to be the active Kubernetes context.)
     #[structopt(long, hide = true, default_value = "minikube")]
     kubernetes_context: String,
-    /// The name of this pod
-    #[clap(
-        long,
-        hide = true,
-        env = "POD_NAME",
-        required_if_eq("orchestrator", "kubernetes")
-    )]
-    pod_name: Option<String>,
-    /// The name of the Kubernetes secret object to use for storing user secrets
-    #[structopt(long, hide = true, required_if_eq("orchestrator", "kubernetes"))]
-    user_defined_secret: Option<String>,
-    /// The mount location of the Kubernetes secret object to use for storing user secrets
-    #[structopt(long, hide = true, required_if_eq("orchestrator", "kubernetes"))]
-    user_defined_secret_mount_path: Option<String>,
     /// The storaged image reference to use.
     #[structopt(
         long,

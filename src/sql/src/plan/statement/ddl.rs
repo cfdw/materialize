@@ -344,17 +344,18 @@ pub fn plan_create_source(
 
     let (external_connection, encoding) = match connection {
         CreateSourceConnection::Kafka(kafka) => {
-            let (broker, config_options) = match &kafka.connection {
-                mz_sql_parser::ast::KafkaConnection::Inline { broker } => (
-                    broker.to_string(),
-                    kafka_util::extract_config(&mut with_options, scx.catalog.secrets_reader())?,
-                ),
+            let connection = match &kafka.connection {
+                mz_sql_parser::ast::KafkaConnection::Inline { broker } => KafkaConnection {
+                    broker: broker.parse()?,
+                    options: kafka_util::extract_config(
+                        &mut with_options,
+                        scx.catalog.secrets_reader(),
+                    )?,
+                },
                 mz_sql_parser::ast::KafkaConnection::Reference { connection, .. } => {
                     let item = scx.get_item_by_resolved_name(&connection)?;
                     match item.connection()? {
-                        Connection::Kafka(connection) => {
-                            (connection.broker.to_string(), connection.options.clone())
-                        }
+                        Connection::Kafka(connection) => connection.clone(),
                         _ => bail!("{} is not a kafka connection", item.name()),
                     }
                 }
@@ -400,14 +401,9 @@ pub fn plan_create_source(
 
             let encoding = get_encoding(scx, format, &envelope)?;
 
-            // TODO(13017): don't inline secrets at this stage.  Push that into storaged.
-            let config_options =
-                kafka_util::inline_secrets(config_options, scx.catalog.secrets_reader())?;
-
             let mut connection = KafkaSourceConnection {
-                addrs: broker.parse()?,
+                connection,
                 topic: kafka.topic.clone(),
-                config_options,
                 start_offsets,
                 group_id_prefix,
                 cluster_id: scx.catalog.config().cluster_id,
@@ -1954,10 +1950,11 @@ fn kafka_sink_builder(
     let consistency_topic = consistency_config.clone().map(|config| config.0);
     let consistency_format = consistency_config.map(|config| config.1);
 
-    // TODO(13017): don't inline secrets at this stage.  Push that into storaged.
-    let config_options = kafka_util::inline_secrets(config_options, scx.catalog.secrets_reader())?;
     Ok(SinkConnectionBuilder::Kafka(KafkaSinkConnectionBuilder {
-        broker_addrs,
+        connection: KafkaConnection {
+            broker: broker_addrs,
+            options: config_options,
+        },
         format,
         topic_prefix,
         consistency_topic_prefix: consistency_topic,
@@ -1966,7 +1963,6 @@ fn kafka_sink_builder(
         partition_count,
         replication_factor,
         fuel: 10000,
-        config_options,
         relation_key_indices,
         key_desc_and_indices,
         value_desc,
@@ -1989,7 +1985,7 @@ fn get_kafka_sink_consistency_config(
     reuse_topic: bool,
     consistency: Option<KafkaConsistency<Aug>>,
     consistency_topic: Option<String>,
-    secrets_reader: &SecretsReader,
+    secrets_reader: &dyn SecretsReader,
 ) -> Result<Option<(String, KafkaSinkFormat)>, anyhow::Error> {
     let result = match consistency {
         Some(KafkaConsistency {

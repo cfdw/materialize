@@ -29,7 +29,8 @@ mz-persist-types = { path = "../persist-types" }
 mz-pgrepr = { path = "../pgrepr" }
 mz-postgres-util = { path = "../postgres-util" }
 mz-repr = { path = "../repr" }
-mz-secrets = { path = "../secrets"}
+mz-secrets = { path = "../secrets" }
+mz-secrets-filesystem = { path = "../secrets-filesystem" }
 mz-sql = { path = "../sql" }
 mz-sql-parser = { path = "../sql-parser" }
 mz-stash = { path = "../stash" }

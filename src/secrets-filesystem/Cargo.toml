@@ -1,6 +1,6 @@
 [package]
 name = "mz-secrets-filesystem"
-description = "Local Filesystem Secrets Controller"
+description = "Secrets management via the local filesystem."
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.61.0"
@@ -10,3 +10,5 @@ publish = false
 anyhow = "1.0.57"
 async-trait = "0.1.56"
 mz-secrets = { path = "../secrets" }
+mz-repr = { path = "../repr" }
+tokio = "1.19.2"

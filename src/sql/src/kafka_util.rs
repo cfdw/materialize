@@ -25,6 +25,7 @@ use rdkafka::client::ClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
 use rdkafka::{Offset, TopicPartitionList};
 use reqwest::Url;
+use tokio::runtime::Handle;
 use tokio::time::Duration;
 
 use mz_ccsr::tls::{Certificate, Identity};
@@ -116,7 +117,6 @@ impl Config {
 fn extract(
     input: &mut BTreeMap<String, SqlValueOrSecret>,
     configs: &[Config],
-    secrets_reader: &SecretsReader,
 ) -> Result<BTreeMap<String, StringOrSecret>, anyhow::Error> {
     let mut out = BTreeMap::new();
     for config in configs {
@@ -127,11 +127,10 @@ fn extract(
                 .process_val(&v)
                 .map(|v| StringOrSecret::String(config.do_transform(v)))
                 .map_err(|e| anyhow!("Invalid WITH option {}={}: {}", config.name, v, e))?,
-            Some(SqlValueOrSecret::Secret(id)) => config
-                .val_type
-                .process_val(&Value::String(secrets_reader.read_string(id)?))
-                .map(|_| StringOrSecret::Secret(id))
-                .map_err(|e| anyhow!("Invalid WITH option {}={:?}: {}", config.name, id, e))?,
+            Some(SqlValueOrSecret::Secret(id)) => match config.val_type {
+                ValType::String => StringOrSecret::Secret(id),
+                _ => bail!("{} option does not support secrets", config.name),
+            },
             // Check for default values
             None => match &config.default {
                 Some(v) => StringOrSecret::String(config.do_transform(v.to_string())),
@@ -155,7 +154,6 @@ fn extract(
 ///   `sql_parser::ast::Value::String`.
 pub fn extract_config(
     with_options: &mut BTreeMap<String, SqlValueOrSecret>,
-    secrets_reader: &SecretsReader,
 ) -> anyhow::Result<BTreeMap<String, StringOrSecret>> {
     extract(
         with_options,
@@ -199,13 +197,11 @@ pub fn extract_config(
                 ValType::Number(0, 1_000_000_000),
             ),
         ],
-        secrets_reader,
     )
 }
 
 pub fn extract_config_ccsr(
     with_options: &mut BTreeMap<String, SqlValueOrSecret>,
-    secrets_reader: &SecretsReader,
 ) -> anyhow::Result<BTreeMap<String, StringOrSecret>> {
     extract(
         with_options,
@@ -216,19 +212,7 @@ pub fn extract_config_ccsr(
             Config::string("username"),
             Config::string("password"),
         ],
-        secrets_reader,
     )
-}
-
-pub fn inline_secrets(
-    config: BTreeMap<String, StringOrSecret>,
-    secrets_reader: &SecretsReader,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    config
-        .into_iter()
-        // TODO: Support more than just strings?
-        .map(|(k, v)| Ok((k, v.get_string(secrets_reader)?)))
-        .collect()
 }
 
 /// Create a new `rdkafka::ClientConfig` with the provided
@@ -245,12 +229,12 @@ pub async fn create_consumer(
     topic: &str,
     options: &BTreeMap<String, StringOrSecret>,
     librdkafka_log_level: tracing::Level,
-    secrets_reader: &SecretsReader,
+    secrets_reader: &dyn SecretsReader,
 ) -> Result<Arc<BaseConsumer<KafkaErrCheckContext>>, anyhow::Error> {
     let mut config = create_new_client_config(librdkafka_log_level);
     config.set("bootstrap.servers", broker);
     for (k, v) in options {
-        config.set(k, v.get_string(secrets_reader)?);
+        config.set(k, v.get_string(secrets_reader).await?);
     }
 
     let consumer: Arc<BaseConsumer<KafkaErrCheckContext>> =
@@ -426,14 +410,17 @@ impl ClientContext for KafkaErrCheckContext {
 pub fn generate_ccsr_client_config(
     csr_url: Url,
     ccsr_options: &mut BTreeMap<String, StringOrSecret>,
-    secrets_reader: &SecretsReader,
+    secrets_reader: &dyn SecretsReader,
 ) -> Result<mz_ccsr::ClientConfig, anyhow::Error> {
     let mut client_config = mz_ccsr::ClientConfig::new(csr_url);
 
     // If provided, prefer SSL options from the schema registry configuration
     if let Some(ca_path) = ccsr_options
         .remove("ssl.ca.location")
-        .map(|v| v.get_string(secrets_reader))
+        // NOTE(benesch): blocking during planning is NOT ALLOWED, but we are
+        // temporarily allowing it here to make incremental progress on secret
+        // references. These calls will disappear before we stabilize secrets.
+        .map(|v| Handle::current().block_on(v.get_string(secrets_reader)))
         .transpose()?
     {
         let mut ca_buf = Vec::new();
@@ -444,11 +431,17 @@ pub fn generate_ccsr_client_config(
 
     let key_path = ccsr_options
         .remove("ssl.key.location")
-        .map(|v| v.get_string(secrets_reader))
+        // NOTE(benesch): blocking during planning is NOT ALLOWED, but we are
+        // temporarily allowing it here to make incremental progress on secret
+        // references. These calls will disappear before we stabilize secrets.
+        .map(|v| Handle::current().block_on(v.get_string(secrets_reader)))
         .transpose()?;
     let cert_path = ccsr_options
         .remove("ssl.certificate.location")
-        .map(|v| v.get_string(secrets_reader))
+        // NOTE(benesch): blocking during planning is NOT ALLOWED, but we are
+        // temporarily allowing it here to make incremental progress on secret
+        // references. These calls will disappear before we stabilize secrets.
+        .map(|v| Handle::current().block_on(v.get_string(secrets_reader)))
         .transpose()?;
     match (key_path, cert_path) {
         (Some(key_path), Some(cert_path)) => {
@@ -470,10 +463,17 @@ pub fn generate_ccsr_client_config(
     }
 
     if let Some(username) = ccsr_options.remove("username") {
-        let username = username.get_string(secrets_reader)?;
+        // NOTE(benesch): blocking during planning is NOT ALLOWED, but we are
+        // temporarily allowing it here to make incremental progress on secret
+        // references. These calls will disappear before we stabilize secrets.
+        let username = Handle::current().block_on(username.get_string(secrets_reader))?;
         let password = ccsr_options
             .remove("password")
-            .map(|v| v.get_string(secrets_reader))
+            // NOTE(benesch): blocking during planning is NOT ALLOWED, but we
+            // are temporarily allowing it here to make incremental progress on
+            // secret references. These calls will disappear before we stabilize
+            // secrets.
+            .map(|v| Handle::current().block_on(v.get_string(secrets_reader)))
             .transpose()?;
         client_config = client_config.auth(username, password);
     }

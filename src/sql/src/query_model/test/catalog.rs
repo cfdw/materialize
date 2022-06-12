@@ -295,7 +295,7 @@ impl SessionCatalog for TestCatalog {
         name
     }
 
-    fn secrets_reader(&self) -> &SecretsReader {
+    fn secrets_reader(&self) -> &dyn SecretsReader {
         unimplemented!()
     }
 }

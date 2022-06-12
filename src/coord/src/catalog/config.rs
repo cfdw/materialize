@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use mz_build_info::BuildInfo;
@@ -32,5 +33,5 @@ pub struct Config<'a, S> {
     pub skip_migrations: bool,
     /// The registry that catalog uses to report metrics.
     pub metrics_registry: &'a MetricsRegistry,
-    pub secrets_reader: SecretsReader,
+    pub secrets_reader: Arc<dyn SecretsReader>,
 }

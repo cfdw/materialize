@@ -17,6 +17,7 @@ members = [
     "src/interchange",
     "src/kafka-util",
     "src/kinesis-util",
+    "src/kubernetes-util",
     "src/lowertest-derive",
     "src/lowertest",
     "src/materialized",

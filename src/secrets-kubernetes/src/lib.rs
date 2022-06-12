@@ -7,174 +7,116 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use anyhow::{anyhow, bail, Error};
+#![deny(missing_docs)]
+
+//! Secrets management via Kubernetes.
+
+use std::iter;
+
+use anyhow::anyhow;
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::ByteString;
-use kube::api::{Patch, PatchParams};
-use kube::config::KubeConfigOptions;
-use kube::{Api, Client, Config, ResourceExt};
-use mz_ore::retry::Retry;
-use mz_secrets::{SecretOp, SecretsController};
-use rand::random;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tokio::io;
-use tracing::info;
+use kube::api::{DeleteParams, Patch, PatchParams};
+use kube::Api;
 
-const FIELD_MANAGER: &str = "materialized";
-const POD_ANNOTATION: &str = "materialized.materialize.cloud/secret-refresh";
-const POLL_TIMEOUT: u64 = 120;
+use mz_repr::GlobalId;
+use mz_secrets::{SecretsController, SecretsReader};
 
+/// Configures a [`KubernetesSecretsController`].
+#[derive(Debug, Clone)]
 pub struct KubernetesSecretsControllerConfig {
-    pub user_defined_secret: String,
-    pub user_defined_secret_mount_path: String,
-    pub refresh_pod_name: String,
+    /// The name of a Kubernetes context to use, if the Kubernetes configuration
+    /// is loaded from the local kubeconfig.
+    pub context: String,
+    /// The field manager to present as when interacting with the Kubernetes
+    /// API.
+    pub field_manager: String,
 }
 
+/// A [`SecretsController`] that stores secrets as Kubernetes `Secret` objects.
+///
+/// Secrets are named `user-managed-ID` and contain one entry named `contents`
+/// which stores the binary contents of the secret.
+#[derive(Debug)]
 pub struct KubernetesSecretsController {
     secret_api: Api<Secret>,
-    pod_api: Api<Pod>,
-    config: KubernetesSecretsControllerConfig,
+    field_manager: String,
 }
 
 impl KubernetesSecretsController {
+    /// Constructs a new Kubernetes secrets controller from the provided
+    /// configuration.
     pub async fn new(
-        context: String,
         config: KubernetesSecretsControllerConfig,
     ) -> Result<KubernetesSecretsController, anyhow::Error> {
-        let kubeconfig_options = KubeConfigOptions {
-            context: Some(context),
-            ..Default::default()
-        };
-
-        let kubeconfig = match Config::from_kubeconfig(&kubeconfig_options).await {
-            Ok(config) => config,
-            Err(kubeconfig_err) => match Config::from_cluster_env() {
-                Ok(config) => config,
-                Err(in_cluster_err) => {
-                    bail!("failed to infer config: in-cluster: ({in_cluster_err}), kubeconfig: ({kubeconfig_err})");
-                }
-            },
-        };
-        let client = Client::try_from(kubeconfig)?;
-        let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
-        let pod_api: Api<Pod> = Api::default_namespaced(client);
-
-        // ensure that the secret has been created in this environment
-        secret_api.get(&*config.user_defined_secret).await?;
-
-        if !Path::new(&config.user_defined_secret_mount_path).is_dir() {
-            bail!(
-                "Configured secrets location could not be found on filesystem: ({})",
-                config.user_defined_secret_mount_path
-            );
-        }
-
+        let (client, _) = mz_kubernetes_util::create_client(config.context).await?;
+        let secret_api: Api<Secret> = Api::default_namespaced(client);
         Ok(KubernetesSecretsController {
             secret_api,
-            pod_api,
-            config,
+            field_manager: config.field_manager,
         })
-    }
-
-    async fn trigger_resync(&mut self) -> Result<(), Error> {
-        let mut pod = Pod::default();
-        pod.annotations_mut().insert(
-            String::from(POD_ANNOTATION),
-            format!("{:x}", random::<u64>()),
-        );
-
-        self.pod_api
-            .patch(
-                &self.config.refresh_pod_name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Apply(pod),
-            )
-            .await?;
-
-        return Ok(());
-    }
-
-    async fn try_exists(path: PathBuf) -> Result<bool, Error> {
-        match tokio::fs::metadata(path).await {
-            Ok(_) => Ok(true),
-            Err(x) if x.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(x) => Err(Error::from(x)),
-        }
     }
 }
 
 #[async_trait]
 impl SecretsController for KubernetesSecretsController {
-    async fn apply(&mut self, ops: Vec<SecretOp>) -> Result<(), Error> {
-        let mut secret: Secret = self
-            .secret_api
-            .get(&*self.config.user_defined_secret)
-            .await?;
-
-        let mut data = secret.data.map_or_else(BTreeMap::new, |m| m);
-
-        for op in ops.iter() {
-            match op {
-                SecretOp::Ensure { id, contents } => {
-                    info!("inserting/updating secret with ID: {}", id);
-                    data.insert(id.to_string(), ByteString(contents.clone()));
-                }
-                SecretOp::Delete { id } => {
-                    info!("deleting secret with ID: {}", id);
-                    data.remove(&*id.to_string());
-                }
-            }
-        }
-
-        secret.data = Some(data);
-
-        // Managed_fields can not be present in the object that is being patched.
-        // if present, they lead to an 'metadata.managedFields must be nil' error
-        secret.metadata.managed_fields = None;
-
+    async fn ensure(&mut self, id: GlobalId, contents: &[u8]) -> Result<(), anyhow::Error> {
+        let data = iter::once(("contents".into(), ByteString(contents.into())));
+        let secret = Secret {
+            data: Some(data.collect()),
+            ..Default::default()
+        };
         self.secret_api
             .patch(
-                &self.config.user_defined_secret,
-                &PatchParams::apply(FIELD_MANAGER).force(),
+                &secret_name(id),
+                &PatchParams::apply(&self.field_manager).force(),
                 &Patch::Apply(secret),
             )
             .await?;
-
-        self.trigger_resync().await?;
-
-        // guarantee that all new secrets are reflected on our local filesystem
-        let secrets_storage_path =
-            PathBuf::from(self.config.user_defined_secret_mount_path.clone());
-        for op in ops.iter() {
-            match op {
-                SecretOp::Ensure { id, .. } => {
-                    Retry::default()
-                        .max_duration(Duration::from_secs(POLL_TIMEOUT))
-                        .retry_async(|_| async {
-                            let file_path = secrets_storage_path.join(format!("{}", id));
-                            match KubernetesSecretsController::try_exists(file_path).await {
-                                Ok(result) => {
-                                    if result {
-                                        Ok(())
-                                    } else {
-                                        Err(anyhow!("Secret write operation has timed out. Secret with id {} could not be written", id))
-                                    }
-                                }
-                                Err(e) => Err(e)
-                            }
-                        }).await?
-                }
-                _ => {}
-            }
-        }
-
-        return Ok(());
+        Ok(())
     }
 
-    fn supports_multi_statement_txn(&self) -> bool {
-        true
+    async fn delete(&mut self, id: GlobalId) -> Result<(), anyhow::Error> {
+        self.secret_api
+            .delete(&secret_name(id), &DeleteParams::default())
+            .await?;
+        Ok(())
     }
+}
+
+/// Reads secrets managed by a [`KubernetesSecretsController`].
+#[derive(Debug)]
+pub struct KubernetesSecretsReader {
+    secret_api: Api<Secret>,
+}
+
+impl KubernetesSecretsReader {
+    /// Constructs a new Kubernetes secrets reader.
+    ///
+    /// The `context` parameter works like
+    /// [`KubernetesSecretsController::context`].
+    pub async fn new(context: String) -> Result<KubernetesSecretsReader, anyhow::Error> {
+        let (client, _) = mz_kubernetes_util::create_client(context).await?;
+        let secret_api: Api<Secret> = Api::default_namespaced(client);
+        Ok(KubernetesSecretsReader { secret_api })
+    }
+}
+
+#[async_trait]
+impl SecretsReader for KubernetesSecretsReader {
+    async fn read(&self, id: GlobalId) -> Result<Vec<u8>, anyhow::Error> {
+        let secret = self.secret_api.get(&secret_name(id)).await?;
+        let mut data = secret
+            .data
+            .ok_or_else(|| anyhow!("internal error: secret missing data field"))?;
+        let contents = data
+            .remove("contents")
+            .ok_or_else(|| anyhow!("internal error: secret missing contents field"))?;
+        Ok(contents.0)
+    }
+}
+
+fn secret_name(id: GlobalId) -> String {
+    format!("user-managed-{id}")
 }

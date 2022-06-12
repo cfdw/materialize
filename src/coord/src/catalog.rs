@@ -39,7 +39,8 @@ use mz_ore::metrics::MetricsRegistry;
 use mz_ore::now::{to_datetime, EpochMillis, NowFn};
 use mz_pgrepr::oid::FIRST_USER_OID;
 use mz_repr::{GlobalId, RelationDesc, ScalarType};
-use mz_secrets::{SecretsReader, SecretsReaderConfig};
+use mz_secrets::SecretsReader;
+use mz_secrets_filesystem::FilesystemSecretsReader;
 use mz_sql::ast::display::AstDisplay;
 use mz_sql::ast::Expr;
 use mz_sql::catalog::{
@@ -140,7 +141,7 @@ pub struct CatalogState {
     roles: HashMap<String, Role>,
     config: mz_sql::catalog::CatalogConfig,
     oid_counter: u32,
-    secrets_reader: SecretsReader,
+    secrets_reader: Arc<dyn SecretsReader>,
 }
 
 impl CatalogState {
@@ -2017,9 +2018,7 @@ impl<S: Append> Catalog<S> {
     ) -> Result<Catalog<S>, anyhow::Error> {
         let metrics_registry = &MetricsRegistry::new();
         let storage = storage::Connection::open(stash).await?;
-        let secrets_reader = SecretsReader::new(SecretsReaderConfig {
-            mount_path: secrets_path.to_path_buf(),
-        });
+        let secrets_reader = Arc::new(FilesystemSecretsReader::new(secrets_path.to_path_buf()));
         let (catalog, _) = Catalog::open(Config {
             storage,
             unsafe_mode: true,
@@ -3813,8 +3812,8 @@ impl SessionCatalog for ConnCatalog<'_> {
         (self.state.config().now)()
     }
 
-    fn secrets_reader(&self) -> &SecretsReader {
-        &self.state.secrets_reader
+    fn secrets_reader(&self) -> &dyn SecretsReader {
+        &*self.state.secrets_reader
     }
 }
 

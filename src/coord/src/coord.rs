@@ -77,7 +77,6 @@ use chrono::{DateTime, Utc};
 use derivative::Derivative;
 use differential_dataflow::lattice::Lattice;
 use futures::StreamExt;
-use itertools::Itertools;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use timely::order::PartialOrder;
@@ -121,7 +120,7 @@ use mz_repr::adt::numeric::{Numeric, NumericMaxScale};
 use mz_repr::{
     Datum, Diff, GlobalId, RelationDesc, RelationType, Row, RowArena, ScalarType, Timestamp,
 };
-use mz_secrets::{SecretOp, SecretsController, SecretsReader};
+use mz_secrets::{SecretsController, SecretsReader};
 use mz_sql::ast::display::AstDisplay;
 use mz_sql::ast::{
     CreateIndexStatement, CreateSourceStatement, ExplainStage, FetchStatement, Ident,
@@ -250,7 +249,7 @@ pub struct Config<S> {
     pub metrics_registry: MetricsRegistry,
     pub now: NowFn,
     pub secrets_controller: Box<dyn SecretsController>,
-    pub secrets_reader: SecretsReader,
+    pub secrets_reader: Arc<dyn SecretsReader>,
     pub availability_zones: Vec<String>,
     pub replica_sizes: ClusterReplicaSizeMap,
     pub connection_context: ConnectionContext,
@@ -1818,12 +1817,6 @@ impl<S: Append + 'static> Coordinator<S> {
                         // is always safe.
                     }
 
-                    Statement::AlterSecret(_)
-                        if self.secrets_controller.supports_multi_statement_txn() =>
-                    {
-                        // if the controller supports this, its safe combine
-                    }
-
                     // Statements below must by run singly (in Started).
                     Statement::AlterIndex(_)
                     | Statement::AlterSecret(_)
@@ -2588,12 +2581,7 @@ impl<S: Append + 'static> Coordinator<S> {
             create_sql: format!("CREATE SECRET {} AS '********'", full_name),
         };
 
-        self.secrets_controller
-            .apply(vec![SecretOp::Ensure {
-                id,
-                contents: payload,
-            }])
-            .await?;
+        self.secrets_controller.ensure(id, &payload).await?;
 
         let ops = vec![catalog::Op::CreateItem {
             id,
@@ -2611,7 +2599,7 @@ impl<S: Append + 'static> Coordinator<S> {
             Err(err) => {
                 match self
                     .secrets_controller
-                    .apply(vec![SecretOp::Delete { id }])
+                    .delete(id)
                     .await
                 {
                     Ok(_) => {}
@@ -3493,9 +3481,6 @@ impl<S: Append + 'static> Coordinator<S> {
                             sender: tx,
                             conn_id: session.conn_id(),
                         });
-                    }
-                    TransactionOps::Secrets(secrets) => {
-                        self.secrets_controller.apply(secrets).await?
                     }
                     _ => {}
                 }
@@ -4907,14 +4892,8 @@ impl<S: Append + 'static> Coordinator<S> {
         plan: AlterSecretPlan,
     ) -> Result<ExecuteResponse, CoordError> {
         let AlterSecretPlan { id, mut secret_as } = plan;
-
         let payload = self.extract_secret(session, &mut secret_as)?;
-
-        session.add_transaction_ops(TransactionOps::Secrets(vec![SecretOp::Ensure {
-            id,
-            contents: payload,
-        }]))?;
-
+        self.secrets_controller.ensure(id, &payload).await?;
         Ok(ExecuteResponse::AlteredObject(ObjectType::Secret))
     }
 
@@ -5202,14 +5181,8 @@ impl<S: Append + 'static> Coordinator<S> {
     }
 
     async fn drop_secrets(&mut self, secrets: Vec<GlobalId>) {
-        let ops = secrets
-            .into_iter()
-            .map(|id| SecretOp::Delete { id })
-            .collect_vec();
-
-        match self.secrets_controller.apply(ops).await {
-            Ok(_) => {}
-            Err(e) => {
+        for secret in secrets {
+            if let Err(e) = self.secrets_controller.delete(secret).await {
                 warn!("Dropping secrets has encountered an error: {}", e);
             }
         }
