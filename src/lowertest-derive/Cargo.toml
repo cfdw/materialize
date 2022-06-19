@@ -10,6 +10,6 @@ rust-version = "1.58.0"
 proc-macro = true
 
 [dependencies]
-quote = "1.0.14"
+quote = "1.0.19"
 syn = {version="1.0.86", features=["extra-traits", "printing"]}
 proc-macro2 = "1.0.36"
