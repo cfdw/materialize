@@ -23,7 +23,6 @@ message ProtoComputeResponse {
     message ProtoPeekResponseKind {
         mz_proto.ProtoU128 id = 1;
         ProtoPeekResponse resp = 2;
-    map<string, string> otel_ctx = 3;
     }
 
     message ProtoTailResponseKind {

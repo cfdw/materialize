@@ -55,7 +55,6 @@ use mz_orchestrator::{
     CpuLimit, MemoryLimit, NamespacedOrchestrator, Orchestrator, ServiceConfig, ServiceEvent,
     ServicePort,
 };
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_persist_client::cache::PersistClientCache;
 use mz_persist_client::PersistLocation;
 use mz_persist_types::Codec64;
@@ -155,11 +154,7 @@ pub struct ComputeInstanceEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ControllerResponse<T = mz_repr::Timestamp> {
     /// The worker's response to a specified (by connection id) peek.
-    ///
-    /// Additionally, an `OpenTelemetryContext` to forward trace information
-    /// back into coord. This allows coord traces to be children of work
-    /// done in compute!
-    PeekResponse(Uuid, PeekResponse, OpenTelemetryContext),
+    PeekResponse(Uuid, PeekResponse),
     /// The worker's next response to a specified tail.
     TailResponse(GlobalId, TailResponse<T>),
     /// Notification that we have received a message from the given compute replica
@@ -170,8 +165,8 @@ pub enum ControllerResponse<T = mz_repr::Timestamp> {
 impl<T> From<ComputeControllerResponse<T>> for ControllerResponse<T> {
     fn from(r: ComputeControllerResponse<T>) -> ControllerResponse<T> {
         match r {
-            ComputeControllerResponse::PeekResponse(uuid, peek, otel_ctx) => {
-                ControllerResponse::PeekResponse(uuid, peek, otel_ctx)
+            ComputeControllerResponse::PeekResponse(uuid, peek) => {
+                ControllerResponse::PeekResponse(uuid, peek)
             }
             ComputeControllerResponse::TailResponse(id, tail) => {
                 ControllerResponse::TailResponse(id, tail)

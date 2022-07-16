@@ -32,7 +32,6 @@ use mz_compute_client::command::{
 use mz_compute_client::logging::LoggingConfig;
 use mz_compute_client::plan::Plan;
 use mz_compute_client::response::{ComputeResponse, PeekResponse, TailResponse};
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_repr::{Diff, GlobalId, Row, Timestamp};
 use mz_storage::controller::CollectionMetadata;
 use mz_storage::types::connections::ConnectionContext;
@@ -103,10 +102,7 @@ impl<'a, A: Allocate> ActiveComputeState<'a, A> {
             DropInstance => (),
             CreateDataflows(dataflows) => self.handle_create_dataflows(dataflows),
             AllowCompaction(list) => self.handle_allow_compaction(list),
-            Peek(peek) => {
-                peek.otel_ctx.attach_as_parent();
-                self.handle_peek(peek)
-            }
+            Peek(peek) => self.handle_peek(peek),
             CancelPeeks { uuids } => self.handle_cancel_peeks(uuids),
         }
     }
@@ -613,11 +609,7 @@ impl<'a, A: Allocate> ActiveComputeState<'a, A> {
     fn send_peek_response(&mut self, peek: PendingPeek, response: PeekResponse) {
         let log_event = peek.as_log_event();
         // Respond with the response.
-        self.send_compute_response(ComputeResponse::PeekResponse(
-            peek.peek.uuid,
-            response,
-            OpenTelemetryContext::obtain(),
-        ));
+        self.send_compute_response(ComputeResponse::PeekResponse(peek.peek.uuid, response));
 
         // Log responding to the peek request.
         if let Some(logger) = self.compute_state.compute_logger.as_mut() {

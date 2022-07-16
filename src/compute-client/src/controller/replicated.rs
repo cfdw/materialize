@@ -22,7 +22,7 @@
 //! compacted frontiers, as the underlying resources to rebuild them any earlier may not
 //! exist any longer.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::bail;
@@ -38,7 +38,6 @@ use tracing::{info, warn};
 
 use mz_build_info::BuildInfo;
 use mz_ore::retry::Retry;
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_repr::GlobalId;
 use mz_service::client::GenericClient;
 
@@ -135,13 +134,6 @@ where
     }
 }
 
-/// Additional information to store with pening peeks.
-#[derive(Debug)]
-pub struct PendingPeek {
-    /// The OpenTelemetry context for this peek.
-    otel_ctx: OpenTelemetryContext,
-}
-
 /// The internal state of the client.
 ///
 /// This lives in a separate struct from the handles to the individual replica
@@ -150,7 +142,7 @@ pub struct PendingPeek {
 #[derive(Debug)]
 pub struct ActiveReplicationState<T> {
     /// Outstanding peek identifiers, to guide responses (and which to suppress).
-    peeks: HashMap<uuid::Uuid, PendingPeek>,
+    peeks: HashSet<uuid::Uuid>,
     /// Reported frontier of each in-progress tail.
     tails: HashMap<GlobalId, Antichain<T>>,
     /// Frontier information, both unioned across all replicas and from each individual replica.
@@ -178,32 +170,19 @@ where
     ) {
         // Update our tracking of peek commands.
         match &cmd {
-            ComputeCommand::Peek(Peek { uuid, otel_ctx, .. }) => {
-                self.peeks.insert(
-                    *uuid,
-                    PendingPeek {
-                        // TODO(guswynn): can we just hold the `tracing::Span`
-                        // here instead?
-                        otel_ctx: otel_ctx.clone(),
-                    },
-                );
+            ComputeCommand::Peek(Peek { uuid, .. }) => {
+                self.peeks.insert(*uuid);
             }
             ComputeCommand::CancelPeeks { uuids } => {
+                // Canceled peeks should not be further responded to.
+                for uuid in uuids.iter() {
+                    self.peeks.remove(uuid);
+                }
                 // Enqueue the response to the cancelation.
                 self.pending_response.extend(uuids.iter().map(|uuid| {
-                    // Canceled peeks should not be further responded to.
-                    let otel_ctx = self
-                        .peeks
-                        .remove(uuid)
-                        .map(|pending| pending.otel_ctx)
-                        .unwrap_or_else(|| {
-                            tracing::warn!("did not find pending peek for {}", uuid);
-                            OpenTelemetryContext::empty()
-                        });
                     ActiveReplicationResponse::ComputeResponse(ComputeResponse::PeekResponse(
                         *uuid,
                         PeekResponse::Canceled,
-                        otel_ctx,
                     ))
                 }));
             }
@@ -245,22 +224,17 @@ where
                 Utc::now(),
             ));
         match message {
-            ComputeResponse::PeekResponse(uuid, response, otel_ctx) => {
+            ComputeResponse::PeekResponse(uuid, response) => {
                 // If this is the first response, forward it; otherwise do not.
                 // TODO: we could collect the other responses to assert equivalence?
                 // Trades resources (memory) for reassurances; idk which is best.
-                //
-                // NOTE: we use the `otel_ctx` from the response, not the
-                // pending peek, because we currently want the parent
-                // to be whatever the compute worker did with this peek.
-                //
-                // Additionally, we just use the `otel_ctx` from the first worker to
-                // respond.
-                self.peeks.remove(&uuid).map(|_| {
-                    ActiveReplicationResponse::ComputeResponse(ComputeResponse::PeekResponse(
-                        uuid, response, otel_ctx,
+                if self.peeks.remove(&uuid) {
+                    Some(ActiveReplicationResponse::ComputeResponse(
+                        ComputeResponse::PeekResponse(uuid, response),
                     ))
-                })
+                } else {
+                    None
+                }
             }
             ComputeResponse::FrontierUppers(mut list) => {
                 for (id, changes) in list.iter_mut() {
@@ -567,7 +541,7 @@ impl<T: timely::progress::Timestamp> ComputeCommandHistory<T> {
     /// response or cancellation.
     ///
     /// Returns the number of distinct commands that remain.
-    pub fn reduce<V>(&mut self, peeks: &std::collections::HashMap<uuid::Uuid, V>) -> usize {
+    pub fn reduce(&mut self, peeks: &HashSet<uuid::Uuid>) -> usize {
         // First determine what the final compacted frontiers will be for each collection.
         // These will determine for each collection whether the command that creates it is required,
         // and if required what `as_of` frontier should be used for its updated command.
@@ -604,14 +578,14 @@ impl<T: timely::progress::Timestamp> ComputeCommandHistory<T> {
                     live_peeks.push(peek);
                 }
                 ComputeCommand::CancelPeeks { mut uuids } => {
-                    uuids.retain(|uuid| peeks.contains_key(uuid));
+                    uuids.retain(|uuid| peeks.contains(uuid));
                     live_cancels.extend(uuids);
                 }
             }
         }
 
         // Retain only those peeks that have not yet been processed.
-        live_peeks.retain(|peek| peeks.contains_key(&peek.uuid));
+        live_peeks.retain(|peek| peeks.contains(&peek.uuid));
 
         // Determine the required antichains to support live peeks;
         let mut live_peek_frontiers = std::collections::BTreeMap::new();

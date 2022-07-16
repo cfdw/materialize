@@ -26,7 +26,6 @@ use uuid::Uuid;
 use mz_expr::{
     CollectionPlan, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, RowSetFinishing,
 };
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_proto::{any_uuid, IntoRustIfSome, ProtoMapEntry, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{GlobalId, RelationType, Row};
 use mz_storage::controller::CollectionMetadata;
@@ -839,11 +838,6 @@ pub struct Peek<T = mz_repr::Timestamp> {
     /// If `Some`, the peek is only handled by the given replica.
     /// If `None`, the peek is handled by all replicas.
     pub target_replica: Option<ReplicaId>,
-    /// An `OpenTelemetryContext` to forward trace information along
-    /// to the compute worker to allow associating traces between
-    /// the compute controller and the compute worker.
-    #[proptest(strategy = "empty_otel_ctx()")]
-    pub otel_ctx: OpenTelemetryContext,
 }
 
 impl RustType<ProtoPeek> for Peek {
@@ -856,7 +850,6 @@ impl RustType<ProtoPeek> for Peek {
             finishing: Some(self.finishing.into_proto()),
             map_filter_project: Some(self.map_filter_project.into_proto()),
             target_replica: self.target_replica,
-            otel_ctx: self.otel_ctx.clone().into(),
         }
     }
 
@@ -871,13 +864,8 @@ impl RustType<ProtoPeek> for Peek {
                 .map_filter_project
                 .into_rust_if_some("ProtoPeek::map_filter_project")?,
             target_replica: x.target_replica,
-            otel_ctx: x.otel_ctx.into(),
         })
     }
-}
-
-fn empty_otel_ctx() -> impl Strategy<Value = OpenTelemetryContext> {
-    (0..1).prop_map(|_| OpenTelemetryContext::empty())
 }
 
 #[cfg(test)]

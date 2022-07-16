@@ -23,7 +23,6 @@ use timely::progress::frontier::Antichain;
 use timely::progress::ChangeBatch;
 use uuid::Uuid;
 
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_proto::{any_uuid, IntoRustIfSome, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{Diff, GlobalId, Row};
 use mz_timely_util::progress::any_change_batch;
@@ -36,7 +35,7 @@ pub enum ComputeResponse<T = mz_repr::Timestamp> {
     /// A list of identifiers of traces, with prior and new upper frontiers.
     FrontierUppers(Vec<(GlobalId, ChangeBatch<T>)>),
     /// The worker's response to a specified (by connection id) peek.
-    PeekResponse(Uuid, PeekResponse, OpenTelemetryContext),
+    PeekResponse(Uuid, PeekResponse),
     /// The worker's next response to a specified tail.
     TailResponse(GlobalId, TailResponse<T>),
 }
@@ -48,13 +47,10 @@ impl RustType<ProtoComputeResponse> for ComputeResponse<mz_repr::Timestamp> {
         ProtoComputeResponse {
             kind: Some(match self {
                 ComputeResponse::FrontierUppers(traces) => FrontierUppers(traces.into_proto()),
-                ComputeResponse::PeekResponse(id, resp, otel_ctx) => {
-                    PeekResponse(ProtoPeekResponseKind {
-                        id: Some(id.into_proto()),
-                        resp: Some(resp.into_proto()),
-                        otel_ctx: otel_ctx.clone().into(),
-                    })
-                }
+                ComputeResponse::PeekResponse(id, resp) => PeekResponse(ProtoPeekResponseKind {
+                    id: Some(id.into_proto()),
+                    resp: Some(resp.into_proto()),
+                }),
                 ComputeResponse::TailResponse(id, resp) => TailResponse(ProtoTailResponseKind {
                     id: Some(id.into_proto()),
                     resp: Some(resp.into_proto()),
@@ -72,7 +68,6 @@ impl RustType<ProtoComputeResponse> for ComputeResponse<mz_repr::Timestamp> {
             Some(PeekResponse(resp)) => Ok(ComputeResponse::PeekResponse(
                 resp.id.into_rust_if_some("ProtoPeekResponseKind::id")?,
                 resp.resp.into_rust_if_some("ProtoPeekResponseKind::resp")?,
-                resp.otel_ctx.into(),
             )),
             Some(TailResponse(resp)) => Ok(ComputeResponse::TailResponse(
                 resp.id.into_rust_if_some("ProtoTailResponseKind::id")?,
@@ -93,9 +88,8 @@ impl Arbitrary for ComputeResponse<mz_repr::Timestamp> {
         prop_oneof![
             proptest::collection::vec((any::<GlobalId>(), any_change_batch()), 1..4)
                 .prop_map(ComputeResponse::FrontierUppers),
-            (any_uuid(), any::<PeekResponse>()).prop_map(|(id, resp)| {
-                ComputeResponse::PeekResponse(id, resp, OpenTelemetryContext::empty())
-            }),
+            (any_uuid(), any::<PeekResponse>())
+                .prop_map(|(id, resp)| { ComputeResponse::PeekResponse(id, resp) }),
             (any::<GlobalId>(), any::<TailResponse>())
                 .prop_map(|(id, resp)| ComputeResponse::TailResponse(id, resp)),
         ]

@@ -34,7 +34,6 @@ use uuid::Uuid;
 
 use mz_build_info::BuildInfo;
 use mz_expr::RowSetFinishing;
-use mz_ore::tracing::OpenTelemetryContext;
 use mz_persist_types::Codec64;
 use mz_repr::{GlobalId, Row};
 use mz_storage::controller::{ReadPolicy, StorageController, StorageError};
@@ -85,7 +84,7 @@ pub struct ComputeControllerMut<'a, T> {
 /// Responses from a compute instance controller.
 pub enum ComputeControllerResponse<T> {
     /// See [`ComputeResponse::PeekResponse`].
-    PeekResponse(Uuid, PeekResponse, OpenTelemetryContext),
+    PeekResponse(Uuid, PeekResponse),
     /// See [`ComputeResponse::TailResponse`].
     TailResponse(GlobalId, TailResponse<T>),
     /// A notification that we heard a response from the given replica at the
@@ -492,9 +491,6 @@ where
             finishing,
             map_filter_project,
             target_replica,
-            // Obtain an `OpenTelemetryContext` from the thread-local tracing
-            // tree to forward it on to the compute worker.
-            otel_ctx: OpenTelemetryContext::obtain(),
         }));
 
         Ok(())
@@ -593,12 +589,11 @@ where
                     self.update_write_frontiers(&updates).await?;
                     Ok(None)
                 }
-                ComputeResponse::PeekResponse(uuid, peek_response, otel_ctx) => {
+                ComputeResponse::PeekResponse(uuid, peek_response) => {
                     self.remove_peeks(std::iter::once(uuid)).await?;
                     Ok(Some(ComputeControllerResponse::PeekResponse(
                         uuid,
                         peek_response,
-                        otel_ctx,
                     )))
                 }
                 ComputeResponse::TailResponse(global_id, response) => {

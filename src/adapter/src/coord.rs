@@ -1393,7 +1393,7 @@ impl<S: Append + 'static> Coordinator<S> {
     async fn message_controller(&mut self, message: ControllerResponse) {
         event!(Level::TRACE, message = format!("{:?}", message));
         match message {
-            ControllerResponse::PeekResponse(uuid, response, otel_ctx) => {
+            ControllerResponse::PeekResponse(uuid, response) => {
                 // We expect exactly one peek response, which we forward. Then we clean up the
                 // peek's state in the coordinator.
                 if let Some(PendingPeek {
@@ -1401,7 +1401,6 @@ impl<S: Append + 'static> Coordinator<S> {
                     conn_id,
                 }) = self.pending_peeks.remove(&uuid)
                 {
-                    otel_ctx.attach_as_parent();
                     // Peek cancellations are best effort, so we might still
                     // receive a response, even though the recipient is gone.
                     let _ = rows_tx.send(response);

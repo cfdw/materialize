@@ -256,7 +256,7 @@ where
                     Some(Ok(ComputeResponse::FrontierUppers(list)))
                 }
             }
-            ComputeResponse::PeekResponse(uuid, response, otel_ctx) => {
+            ComputeResponse::PeekResponse(uuid, response) => {
                 // Incorporate new peek responses; awaiting all responses.
                 let entry = self
                     .peek_responses
@@ -280,8 +280,7 @@ where
                         };
                     }
                     self.peek_responses.remove(&uuid);
-                    // We take the otel_ctx from the last peek, but they should all be the same
-                    Some(Ok(ComputeResponse::PeekResponse(uuid, response, otel_ctx)))
+                    Some(Ok(ComputeResponse::PeekResponse(uuid, response)))
                 } else {
                     None
                 }
