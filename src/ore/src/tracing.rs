@@ -329,7 +329,10 @@ where
     Ok(otel_reloader)
 }
 
-/// Shutdown any tracing infra, if any.
+/// Shuts down any running tracing infrastructure.
+///
+/// Call this during graceful termination to ensure that all spans have been
+/// flushed.
 pub fn shutdown() {
     opentelemetry::global::shutdown_tracer_provider();
 }
@@ -414,7 +417,7 @@ impl OpenTelemetryContext {
 
     /// Obtains a `Context` from the current [`tracing`] span.
     pub fn obtain() -> Self {
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         global::get_text_map_propagator(|propagator| {
             propagator.inject_context(&tracing::Span::current().context(), &mut map)
         });
