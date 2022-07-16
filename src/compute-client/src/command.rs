@@ -26,6 +26,7 @@ use uuid::Uuid;
 use mz_expr::{
     CollectionPlan, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, RowSetFinishing,
 };
+use mz_ore::tracing::Traced;
 use mz_proto::{any_uuid, IntoRustIfSome, ProtoMapEntry, ProtoType, RustType, TryFromProtoError};
 use mz_repr::{GlobalId, RelationType, Row};
 use mz_storage::controller::CollectionMetadata;
@@ -74,12 +75,12 @@ pub enum ComputeCommand<T = mz_repr::Timestamp> {
     },
 }
 
-impl RustType<ProtoComputeCommand> for ComputeCommand<mz_repr::Timestamp> {
+impl RustType<ProtoComputeCommand> for Traced<ComputeCommand<mz_repr::Timestamp>> {
     fn into_proto(&self) -> ProtoComputeCommand {
         use proto_compute_command::Kind::*;
         use proto_compute_command::*;
         ProtoComputeCommand {
-            kind: Some(match self {
+            kind: Some(match &self.inner {
                 ComputeCommand::CreateInstance(config) => CreateInstance(config.into_proto()),
                 ComputeCommand::DropInstance => DropInstance(()),
                 ComputeCommand::CreateDataflows(dataflows) => {
@@ -97,29 +98,36 @@ impl RustType<ProtoComputeCommand> for ComputeCommand<mz_repr::Timestamp> {
                     uuids: uuids.into_proto(),
                 }),
             }),
+            otel_ctx: self.otel_ctx.clone().into(),
         }
     }
 
     fn from_proto(proto: ProtoComputeCommand) -> Result<Self, TryFromProtoError> {
         use proto_compute_command::Kind::*;
         use proto_compute_command::*;
-        match proto.kind {
-            Some(CreateInstance(config)) => Ok(ComputeCommand::CreateInstance(config.into_rust()?)),
-            Some(DropInstance(())) => Ok(ComputeCommand::DropInstance),
+        let inner = match proto.kind {
+            Some(CreateInstance(config)) => ComputeCommand::CreateInstance(config.into_rust()?),
+            Some(DropInstance(())) => ComputeCommand::DropInstance,
             Some(CreateDataflows(ProtoCreateDataflows { dataflows })) => {
-                Ok(ComputeCommand::CreateDataflows(dataflows.into_rust()?))
+                ComputeCommand::CreateDataflows(dataflows.into_rust()?)
             }
             Some(AllowCompaction(ProtoAllowCompaction { collections })) => {
-                Ok(ComputeCommand::AllowCompaction(collections.into_rust()?))
+                ComputeCommand::AllowCompaction(collections.into_rust()?)
             }
-            Some(Peek(peek)) => Ok(ComputeCommand::Peek(peek.into_rust()?)),
-            Some(CancelPeeks(ProtoCancelPeeks { uuids })) => Ok(ComputeCommand::CancelPeeks {
+            Some(Peek(peek)) => ComputeCommand::Peek(peek.into_rust()?),
+            Some(CancelPeeks(ProtoCancelPeeks { uuids })) => ComputeCommand::CancelPeeks {
                 uuids: uuids.into_rust()?,
-            }),
-            None => Err(TryFromProtoError::missing_field(
-                "ProtoComputeCommand::kind",
-            )),
-        }
+            },
+            None => {
+                return Err(TryFromProtoError::missing_field(
+                    "ProtoComputeCommand::kind",
+                ))
+            }
+        };
+        Ok(Traced {
+            inner,
+            otel_ctx: proto.otel_ctx.into(),
+        })
     }
 }
 
@@ -888,7 +896,7 @@ mod tests {
         }
 
         #[test]
-        fn compute_command_protobuf_roundtrip(expect in any::<ComputeCommand<mz_repr::Timestamp>>() ) {
+        fn compute_command_protobuf_roundtrip(expect in any::<Traced<ComputeCommand<mz_repr::Timestamp>>>() ) {
             let actual = protobuf_roundtrip::<_, ProtoComputeCommand>(&expect);
             assert!(actual.is_ok());
             assert_eq!(actual.unwrap(), expect);

@@ -38,9 +38,11 @@ use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use opentelemetry::sdk::{trace, Resource};
 use opentelemetry::KeyValue;
+use proptest_derive::Arbitrary;
+use serde::{Serialize, Deserialize};
 use tonic::metadata::MetadataMap;
 use tonic::transport::Endpoint;
-use tracing::{Event, Level, Subscriber};
+use tracing::{Event, Level, Subscriber, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::format::{format, Writer};
@@ -398,28 +400,27 @@ where
 /// An OpenTelemetry context.
 ///
 /// Allows associating [`tracing`] spans across task or thread boundaries.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Arbitrary, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenTelemetryContext {
     inner: HashMap<String, String>,
 }
 
 impl OpenTelemetryContext {
-    /// Attaches this `Context` to the current [`tracing`] span,
-    /// as its parent.
+    /// Attaches this `Context` as the parent of the specified [`tracing`] span.
     ///
     /// If there is not enough information in this `OpenTelemetryContext`
     /// to create a context, then the current thread's `Context` is used
     /// defaulting to the default `Context`.
-    pub fn attach_as_parent(&self) {
+    pub fn attach_as_parent(&self, span: &Span) {
         let parent_cx = global::get_text_map_propagator(|prop| prop.extract(&self.inner));
-        tracing::Span::current().set_parent(parent_cx);
+        span.set_parent(parent_cx);
     }
 
-    /// Obtains a `Context` from the current [`tracing`] span.
-    pub fn obtain() -> Self {
+    /// Obtains a `Context` from the specified [`tracing`] span.
+    pub fn from_span(span: &Span) -> Self {
         let mut map = HashMap::new();
         global::get_text_map_propagator(|propagator| {
-            propagator.inject_context(&tracing::Span::current().context(), &mut map)
+            propagator.inject_context(&span.context(), &mut map)
         });
 
         Self { inner: map }
@@ -458,4 +459,13 @@ impl From<HashMap<String, String>> for OpenTelemetryContext {
     fn from(map: HashMap<String, String>) -> Self {
         Self { inner: map }
     }
+}
+
+/// A struct that wraps another type with an [`OpenTelemetryContext`].
+#[derive(Arbitrary, Debug, Clone, PartialEq)]
+pub struct Traced<T> {
+    /// The wrapped type.
+    pub inner: T,
+    /// The associated OpenTelemetry context.
+    pub otel_ctx: OpenTelemetryContext,
 }

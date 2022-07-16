@@ -19,6 +19,8 @@ use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
 use tokio_stream::StreamMap;
 
+use mz_ore::tracing::Traced;
+
 /// A generic client to a server that receives commands and asynchronously
 /// produces responses.
 #[async_trait]
@@ -176,4 +178,40 @@ pub trait PartitionedState<C, R>: fmt::Debug + Send {
     /// amalgamated response.
     fn absorb_response(&mut self, shard_id: usize, response: R)
         -> Option<Result<R, anyhow::Error>>;
+}
+
+impl<C, R> Partitionable<Traced<C>, R> for (Traced<C>, R)
+where
+    (C, R): Partitionable<C, R>,
+{
+    type PartitionedState = <(C, R) as Partitionable<C, R>>::PartitionedState;
+
+    fn new(parts: usize) -> Self::PartitionedState {
+        <(C, R)>::new(parts)
+    }
+}
+
+impl<C, R, T> PartitionedState<Traced<C>, R> for T
+where
+    T: PartitionedState<C, R>,
+{
+    fn split_command(&mut self, command: Traced<C>) -> Vec<Traced<C>> {
+        let inner = command.inner;
+        let otel_ctx = command.otel_ctx;
+        <Self as PartitionedState<C, R>>::split_command(self, inner)
+            .into_iter()
+            .map(|inner| Traced {
+                inner,
+                otel_ctx: otel_ctx.clone(),
+            })
+            .collect()
+    }
+
+    fn absorb_response(
+        &mut self,
+        shard_id: usize,
+        response: R,
+    ) -> Option<Result<R, anyhow::Error>> {
+        <Self as PartitionedState<C, R>>::absorb_response(self, shard_id, response)
+    }
 }

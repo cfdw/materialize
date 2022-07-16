@@ -3558,6 +3558,8 @@ dependencies = [
  "paste",
  "pin-project",
  "prometheus",
+ "proptest",
+ "proptest-derive",
  "serde",
  "smallvec",
  "stacker",

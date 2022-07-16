@@ -45,6 +45,7 @@ message ProtoComputeCommand {
         ProtoPeek peek = 5;
         ProtoCancelPeeks cancel_peeks = 6;
     }
+    map<string, string> otel_ctx = 7;
 }
 
 message ProtoInstanceConfig {

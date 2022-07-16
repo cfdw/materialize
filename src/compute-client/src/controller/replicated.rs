@@ -34,10 +34,11 @@ use timely::progress::frontier::MutableAntichain;
 use timely::progress::{Antichain, Timestamp};
 use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tracing::{info, warn};
+use tracing::{info, warn, span, Level, Span};
 
 use mz_build_info::BuildInfo;
 use mz_ore::retry::Retry;
+use mz_ore::tracing::{Traced, OpenTelemetryContext};
 use mz_repr::GlobalId;
 use mz_service::client::GenericClient;
 
@@ -54,7 +55,7 @@ struct ReplicaTaskConfig<T> {
     /// The build information for this process.
     build_info: &'static BuildInfo,
     /// A channel upon which commands intended for the replica are delivered.
-    command_rx: UnboundedReceiver<ComputeCommand<T>>,
+    command_rx: UnboundedReceiver<Traced<ComputeCommand<T>>>,
     /// A channel upon which responses from the replica are delivered.
     response_tx: UnboundedSender<ComputeResponse<T>>,
 }
@@ -355,7 +356,7 @@ struct ReplicaState<T> {
     ///
     /// If sending to this channel fails, the replica has failed and requires
     /// rehydration.
-    command_tx: UnboundedSender<ComputeCommand<T>>,
+    command_tx: UnboundedSender<Traced<ComputeCommand<T>>>,
     /// A receiver for responses from the replica.
     ///
     /// If receiving from the channel returns `None`, the replica has failed
@@ -394,11 +395,15 @@ where
         self.state.last_command_count = self.state.history.reduce(&self.state.peeks);
 
         // Replay the commands at the client, creating new dataflow identifiers.
+        let otel_ctx = OpenTelemetryContext::from_span(&span!(Level::INFO, "rehydrate_compute_replica", replica_id = id));
         for command in self.state.history.iter() {
             let mut command = command.clone();
             specialize_command(&mut command, id);
             command_tx
-                .send(command)
+                .send(Traced {
+                    inner: command,
+                    otel_ctx: otel_ctx.clone(),
+                })
                 .expect("Channel to client has gone away!")
         }
 
@@ -460,8 +465,13 @@ where
         for (id, replica) in self.replicas.iter_mut() {
             let mut command = cmd.clone();
             specialize_command(&mut command, *id);
-            // If sending the command fails, the replica requires rehydration.
-            if replica.command_tx.send(command).is_err() {
+            if replica.command_tx.send(Traced {
+                inner: command,
+                // Plumb along our current span. This associates the originator
+                // of the command with the work on the remote replica.
+                otel_ctx: OpenTelemetryContext::from_span(&Span::current()),
+            }).is_err() {
+                // If sending the command fails, the replica requires rehydration.
                 failed_replicas.push(*id);
             }
         }

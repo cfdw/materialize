@@ -23,6 +23,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::debug;
 use uuid::Uuid;
 
+use mz_ore::tracing::Traced;
 use mz_repr::{Diff, GlobalId, Row};
 use mz_service::client::{GenericClient, Partitionable, PartitionedState};
 use mz_service::grpc::{
@@ -40,15 +41,20 @@ include!(concat!(env!("OUT_DIR"), "/mz_compute_client.service.rs"));
 
 /// A client to a compute server.
 pub trait ComputeClient<T = mz_repr::Timestamp>:
-    GenericClient<ComputeCommand<T>, ComputeResponse<T>>
+    GenericClient<Traced<ComputeCommand<T>>, ComputeResponse<T>>
 {
 }
 
-impl<C, T> ComputeClient<T> for C where C: GenericClient<ComputeCommand<T>, ComputeResponse<T>> {}
+impl<C, T> ComputeClient<T> for C where
+    C: GenericClient<Traced<ComputeCommand<T>>, ComputeResponse<T>>
+{
+}
 
 #[async_trait]
-impl<T: Send> GenericClient<ComputeCommand<T>, ComputeResponse<T>> for Box<dyn ComputeClient<T>> {
-    async fn send(&mut self, cmd: ComputeCommand<T>) -> Result<(), anyhow::Error> {
+impl<T: Send> GenericClient<Traced<ComputeCommand<T>>, ComputeResponse<T>>
+    for Box<dyn ComputeClient<T>>
+{
+    async fn send(&mut self, cmd: Traced<ComputeCommand<T>>) -> Result<(), anyhow::Error> {
         (**self).send(cmd).await
     }
     async fn recv(&mut self) -> Result<Option<ComputeResponse<T>>, anyhow::Error> {
@@ -78,7 +84,7 @@ impl BidiProtoClient for ProtoComputeClient<ClientTransport> {
 #[async_trait]
 impl<G> ProtoCompute for GrpcServer<G>
 where
-    G: GenericClient<GrpcServerCommand<ComputeCommand>, ComputeResponse> + 'static,
+    G: GenericClient<GrpcServerCommand<Traced<ComputeCommand>>, ComputeResponse> + 'static,
 {
     type CommandResponseStreamStream = ResponseStream<ProtoComputeResponse>;
 
