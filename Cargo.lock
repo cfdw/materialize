@@ -108,7 +108,7 @@ dependencies = [
  "futures",
  "hash_hasher",
  "num-traits",
- "parquet2",
+ "parquet2 0.8.1",
  "simdutf8",
 ]
 
@@ -3473,7 +3473,7 @@ dependencies = [
  "mz-build-info",
  "mz-ore",
  "mz-persist-types",
- "parquet2",
+ "parquet2 0.15.1",
  "prost",
  "prost-build",
  "rand",
@@ -4260,6 +4260,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parquet-format-safe"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a03a826e7d8ca57df1dbfd16b3a08c38110b3f23f76cfc2045e255e87af30b89"
+
+[[package]]
 name = "parquet2"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4269,6 +4275,17 @@ dependencies = [
  "bitpacking",
  "futures",
  "parquet-format-async-temp",
+ "streaming-decompression",
+]
+
+[[package]]
+name = "parquet2"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f03a6f84e35cb84862a95f13e31466c834576502e3e3793178a531f62b8621"
+dependencies = [
+ "bitpacking",
+ "parquet-format-safe",
  "streaming-decompression",
 ]
 
