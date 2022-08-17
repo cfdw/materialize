@@ -502,7 +502,7 @@ impl KafkaSinkState {
         config.set("socket.keepalive.enable", "true");
 
         // Increase timeout for sink connections JOSH ARENBERG
-        config.set("socket.timeout.ms", &format!("{}", 300_000))
+        config.set("socket.timeout.ms", &format!("{}", 300_000));
 
 
         // Increase limits for the Kafka producer's internal buffering of messages
