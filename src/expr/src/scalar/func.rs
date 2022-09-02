@@ -3481,6 +3481,9 @@ pub enum UnaryFunc {
     PgColumnSize(PgColumnSize),
     MzRowSize(MzRowSize),
     MzTypeName(MzTypeName),
+    TruncFloat32(TruncFloat32),
+    TruncFloat64(TruncFloat64),
+    TruncNumeric(TruncNumeric),
 }
 
 derive_unary!(
@@ -3565,6 +3568,9 @@ derive_unary!(
     LnNumeric,
     Log10Numeric,
     RoundNumeric,
+    TruncFloat32,
+    TruncFloat64,
+    TruncNumeric,
     SqrtNumeric,
     CastBoolToString,
     CastBoolToStringNonstandard,
@@ -3821,7 +3827,10 @@ impl UnaryFunc {
             | CastPgLegacyCharToInt32(_)
             | CastBytesToString(_)
             | CastVarCharToString(_)
-            | Chr(_) => unreachable!(),
+            | Chr(_)
+            | TruncFloat32(_)
+            | TruncFloat64(_)
+            | TruncNumeric(_) => unreachable!(),
             CastStringToJsonb => cast_string_to_jsonb(a, temp_storage),
             CastJsonbOrNullToJsonb => Ok(cast_jsonb_or_null_to_jsonb(a)),
             CastJsonbToString => Ok(cast_jsonb_to_string(a, temp_storage)),
@@ -4060,7 +4069,10 @@ impl UnaryFunc {
             | CastPgLegacyCharToInt32(_)
             | CastBytesToString(_)
             | CastVarCharToString(_)
-            | Chr(_) => unreachable!(),
+            | Chr(_)
+            | TruncFloat32(_)
+            | TruncFloat64(_)
+            | TruncNumeric(_) => unreachable!(),
 
             Ascii | CharLength | BitLengthBytes | BitLengthString | ByteLengthBytes
             | ByteLengthString => ScalarType::Int32.nullable(nullable),
@@ -4323,7 +4335,10 @@ impl UnaryFunc {
             | CastPgLegacyCharToInt32(_)
             | CastBytesToString(_)
             | CastVarCharToString(_)
-            | Chr(_) => unreachable!(),
+            | Chr(_)
+            | TruncFloat32(_)
+            | TruncFloat64(_)
+            | TruncNumeric(_) => unreachable!(),
             // These return null when their input is SQL null.
             CastJsonbToString | CastJsonbToInt16 | CastJsonbToInt32 | CastJsonbToInt64
             | CastJsonbToFloat32 | CastJsonbToFloat64 | CastJsonbToBool => true,
@@ -4606,7 +4621,10 @@ impl UnaryFunc {
             | CastPgLegacyCharToInt32(_)
             | CastBytesToString(_)
             | CastVarCharToString(_)
-            | Chr(_) => unreachable!(),
+            | Chr(_)
+            | TruncFloat32(_)
+            | TruncFloat64(_)
+            | TruncNumeric(_) => unreachable!(),
             CastStringToJsonb => f.write_str("strtojsonb"),
             CastJsonbOrNullToJsonb => f.write_str("jsonb?tojsonb"),
             CastJsonbToString => f.write_str("jsonbtostr"),
